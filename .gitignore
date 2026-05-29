@@ -1,0 +1,5 @@
+cc-codex-discussion-history/
+__pycache__/
+*.pyc
+.DS_Store
+*.skill

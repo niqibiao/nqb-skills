@@ -1,0 +1,22 @@
+{
+  "name": "nqb-skills",
+  "owner": {
+    "name": "niqibiao",
+    "email": "niqibiao@duck.com"
+  },
+  "metadata": {
+    "description": "niqibiao's Claude Code skills",
+    "version": "1.0.0"
+  },
+  "plugins": [
+    {
+      "name": "cc-codex-discussion",
+      "description": "Run a turn-by-turn adversarial discussion between Claude Code and the Codex CLI through a shared markdown file, converging on a high-confidence, evidence-backed conclusion.",
+      "source": "./",
+      "strict": false,
+      "skills": [
+        "./skills/cc-codex-discussion"
+      ]
+    }
+  ]
+}
