@@ -95,15 +95,20 @@ Output only your reply body (it will be recorded verbatim). If you believe there
 EOF
 )" 2>/dev/null)
 ```
-Progress goes to stderr; `2>/dev/null` leaves a clean reply on stdout. Then **CC** records it:
+Progress goes to stderr; `2>/dev/null` leaves a clean reply on stdout.
+
+**A round counts only as a substantive, environment-clean reply.** Gate on two checks before appending:
+- **Transport** — the `node` call exits zero, doesn't time out, and `$REPLY` is non-empty (`append` refuses an empty block as a backstop).
+- **Environment** — the reply doesn't show Codex was blocked from running the commands it grounds its objections on (e.g. `Permission denied`, `command not found`, "I don't have access to…"); a blocked environment makes its turn untrustworthy.
+
+If either fails it is **not a valid turn**: don't append, don't advance the round. Stop the loop, surface the specifics to the user — the stderr, or the exact error plus the command/path it failed on — and let the user decide the next step (retry the round, change the `--cwd` read scope, continue without Codex, or abort). Don't rebut a turn that never grounded itself.
+
+Once both pass, **CC's first action is to append the reply verbatim**, before any analysis, rebuttal, or ledger work — the shared file is the source of truth; never paraphrase a turn that isn't yet on disk.
 ```
 printf '%s\n' "$REPLY" | python "<SK>" append "$F" --role codex --round N
 ```
-**Failure handling (item 4):** if the `node` call exits non-zero, times out, or `$REPLY` is empty,
-**do not** append and **do not** advance the round. Surface the stderr to the user and offer
-retry / abort / continue-with-summary. (`append` refuses an empty block as a backstop.)
 
-**Resume-drift guard (item 5):** if another Codex task may be running in this repo, or Codex's reply
+**Resume-drift guard:** if another Codex task may be running in this repo, or Codex's reply
 doesn't engage CC's latest turn (off-context), drop `--resume-last` and instead prepend a compact
 running summary of the debate to the prompt — deterministic mode over warm-context efficiency.
 
