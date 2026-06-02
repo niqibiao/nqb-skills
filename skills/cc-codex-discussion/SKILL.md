@@ -123,12 +123,26 @@ EOF
 ```
 
 ### 2b. Codex round N≥2 — adversarial (inject CC's latest turn)
+**Round 2 = symmetric cross-review (mandatory).** Round 2 is the first time the two independent
+round-1 takes meet. Codex already holds its own `codex r1` in warm context (`--resume-last`) but
+has **never seen `cc r1`** — so on round 2 inject `cc r1` explicitly and make Codex cross-review
+it. This closes the asymmetry where CC reviews Codex's r1 but Codex only ever sees CC's rebuttal.
+For round ≥ 3 CC's positions already flow through the turns — inject only the latest turn.
 ```
-CC_TURN=$(python "<SK>" delta "$F")
+CC_TURN=$(python "<SK>" delta "$F")              # CC's latest turn (= cc r2 on round 2)
+CC_R1=$(python "<SK>" delta "$F" --role cc --round 1)   # round 2 ONLY — CC's independent take
 LOG=$(mktemp)
 REPLY=$(node "$CODEX" task --resume-last [--cwd "<materials-repo-root>"] "$(cat <<EOF
 Continue the adversarial review. Reply in <user's language>. Speak with execution evidence; back
 every objection with file:line / output / repro. Concede the points that are correct.
+
+[Round 2 only] Below is CC's round-1 INDEPENDENT analysis — you wrote your own r1 without seeing
+it. Cross-review it against your own r1: which of CC's points do you confirm, which do you refute
+(with evidence), and — most important — what did CC flag that you missed?
+---
+${CC_R1}
+---
+
 This is Claude Code's latest turn; respond to it:
 ---
 ${CC_TURN}
@@ -138,6 +152,7 @@ debate can converge, add a final line: ### AGREEMENT
 EOF
 )" 2>"$LOG")
 ```
+Drop the `CC_R1` block and its `[Round 2 only]` paragraph for round ≥ 3.
 stderr goes to `$LOG` — **do not** use `2>/dev/null`, or there is nothing to surface on failure.
 
 **Turn validity — pass all three before appending:**
