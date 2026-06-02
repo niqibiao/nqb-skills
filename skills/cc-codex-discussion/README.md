@@ -7,11 +7,14 @@ shared markdown file**, each model playing to its strengths, until they converge
 
 - **CC is the sole writer + loop driver.** Codex runs read-only and returns its reply on
   stdout; CC appends it. No write races, zero blast radius.
-- **Codex memory persists** across rounds via `--resume-last`, so only the changed turn is
-  fed each round.
+- **Round 1 is independent:** both sides analyze the raw materials on their own — Codex does
+  not see CC's position — so neither anchors the other. From round 2 they go adversarial, each
+  fed the other's latest turn (`--resume-last`).
+- The transcript lives in a **system-temp** scratch during the run (so Codex can't read CC's
+  round-1 analysis), then is copied back to `cc-codex-discussion-history/` after sign-off.
 - The blocking Codex call **is** the turn synchronization — no daemons or file-watching.
 - A fail-closed transcript parser validates the debate log (alternating roles, increasing
-  rounds, no duplicates) and feeds each side only the latest block.
+  rounds, no duplicates).
 
 Released under the Apache License 2.0 (see [`LICENSE.txt`](LICENSE.txt)).
 
@@ -62,7 +65,7 @@ conclusion — with a stated confidence level and residual risks — for your si
 
 | | Strength | Role in the debate |
 |---|---|---|
-| **Codex** (GPT-5-codex) | runs commands, reads the real repo | execution-grounded adversary — every objection backed by `file:line` / output / repro |
+| **Codex** (GPT-5-codex) | runs commands, reads the real repo | round 1: independent grounded investigator; round 2+: adversary — every claim backed by `file:line` / output / repro |
 | **CC** (Claude/Opus) | architecture, synthesis, judgment | architect + arbiter — verifies findings against the project's spec/decisions, writes the synthesis |
 
 An **open-objections ledger** gates the conclusion: it can only be written as *agreed* when

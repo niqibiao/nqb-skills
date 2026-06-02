@@ -30,6 +30,7 @@ import datetime as _dt
 import json
 import re
 import sys
+import tempfile
 from pathlib import Path
 
 HEAD_RE = re.compile(r"^## (CC|Codex) · Round (\d+)\s*$")
@@ -106,7 +107,8 @@ def validate(blocks):
 
 
 def cmd_new(args) -> None:
-    base = Path.cwd() / DIR_NAME
+    root = Path(tempfile.gettempdir()) if getattr(args, "scratch", False) else Path.cwd()
+    base = root / DIR_NAME
     base.mkdir(parents=True, exist_ok=True)
     stamp = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
     path = base / f"{stamp}-{_slugify(args.slug)}.md"
@@ -183,7 +185,7 @@ def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    sp = sub.add_parser("new"); sp.add_argument("slug"); sp.add_argument("--topic", default=""); sp.set_defaults(fn=cmd_new)
+    sp = sub.add_parser("new"); sp.add_argument("slug"); sp.add_argument("--topic", default=""); sp.add_argument("--scratch", action="store_true", help="create the history dir under the system temp dir (tempfile.gettempdir()) instead of cwd, for round-1 isolation"); sp.set_defaults(fn=cmd_new)
     sp = sub.add_parser("append"); sp.add_argument("file"); sp.add_argument("--role", required=True, choices=["cc", "codex"]); sp.add_argument("--round", type=int, required=True); sp.set_defaults(fn=cmd_append)
     sp = sub.add_parser("delta"); sp.add_argument("file"); sp.add_argument("--role", choices=["cc", "codex"]); sp.add_argument("--round", type=int); sp.set_defaults(fn=cmd_delta)
     sp = sub.add_parser("check"); sp.add_argument("file"); sp.set_defaults(fn=cmd_check)
