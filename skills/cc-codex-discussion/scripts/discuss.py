@@ -16,8 +16,10 @@ sequence (alternating cc/codex, rounds increasing, no duplicates). Non-turn sect
 (`# Topic…`, `## Conclusion…`, `## Ledger…`) are ignored by the parser.
 
 Subcommands:
-  new <slug> [--topic T]              Create the discussion file; print absolute path.
-  append <file> --role R --round N    Append stdin as one atomic block (body + marker).
+  new <slug> [--topic T] [--scratch]  Create the discussion file; print absolute path.
+                                      --scratch: create under the system temp dir (round-1 isolation).
+  append <file> --role R --round N    Append stdin as one atomic block (body + marker). Fail-closed
+                                      on order: rejects a block that breaks cc/codex alternation.
   delta <file> [--role R --round N]   Print one block's body. Default: the last block.
                                       With --role/--round: that exact block (fail closed).
   check <file>                        Validate the whole transcript; exit 1 + diagnostics
@@ -123,6 +125,22 @@ def cmd_append(args) -> None:
         _fail("refusing to append an empty block (read-only Codex failure? do not advance round)")
     path = Path(args.file)
     text = path.read_text(encoding="utf-8")
+    # Fail closed on order: the new block must continue the cc/codex alternation with
+    # increasing rounds. Catches a skipped turn (e.g. forgetting to append Codex's reply
+    # and writing the next CC turn) at write time, not later at `check`.
+    try:
+        blocks = parse_blocks(text)
+        validate(blocks)
+    except ValueError as e:
+        _fail(f"transcript already malformed; rebuild it before appending ({e})")
+    n = len(blocks)
+    exp_role, exp_round = ("cc" if n % 2 == 0 else "codex"), n // 2 + 1
+    if (args.role, args.round) != (exp_role, exp_round):
+        _fail(
+            f"out-of-order append: got {args.role} r{args.round}, expected {exp_role} r{exp_round} "
+            f"({n} block(s) so far; turns must alternate cc/codex with increasing rounds). "
+            f"Did you skip appending the other side's turn?"
+        )
     if text and not text.endswith("\n"):
         text += "\n"
     heading = "CC" if args.role == "cc" else "Codex"

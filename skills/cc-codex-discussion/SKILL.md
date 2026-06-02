@@ -78,9 +78,8 @@ Process the user's requirement. Create the transcript in the **system temp dir**
 ```
 F=$(python "<SK>" new "<neutral-slug>" --scratch --topic "<neutral one-line topic>")
 ```
-`--scratch` puts the transcript under `tempfile.gettempdir()`, i.e. **outside** Codex's actual
-workspace (`resolveWorkspaceRoot(--cwd)`, which is the git root for code topics). **This is what
-makes round 1 independent — physically, not by prompt discipline.**
+`--scratch` puts the transcript outside Codex's actual workspace (`resolveWorkspaceRoot(--cwd)` =
+the git root for code topics), which is what makes round 1 independent — physically, not by prompt.
 
 Form **CC's own independent analysis** from the raw materials (don't pre-guess what Codex will
 say, don't pick an attack surface) and append it as `cc·round 1`:
@@ -89,100 +88,86 @@ python "<SK>" append "$F" --role cc --round 1 <<'EOF'
 <CC's independent analysis of the raw materials>
 EOF
 ```
-> Defense-in-depth (optional): if worried Codex might read absolute paths outside its workspace,
-> delay this append until after Codex's round-1 reply returns. Not required — temp isolation suffices.
 
-**Read scope (both templates):** point Codex's `--cwd` at the git root that holds the raw
-materials (code topics → repo root; pure-design → the repo holding the spec/plan). The read
-scope must **never be narrower than the source materials** — what's forbidden is *unrelated*
-repo exploration, not reading the materials CC pointed at. Never pass `--write`.
-
-### 2a. Codex round 1 — independent investigation (read-only, reply on stdout)
-**No `--resume-last`. The prompt MUST NOT contain `CC_TURN` / `delta` / "respond to it" /
-`### AGREEMENT`** — round 1 is not adversarial yet.
+### 2. Codex turn (every round N) — read-only, reply on stdout
+**Call shape (identical every round).** `--cwd` at the git root holding the raw materials (code
+topics → repo root; pure-design → the spec/plan's repo); read scope must **never be narrower than
+the source materials** (forbidden is *unrelated* exploration, not reading what CC pointed at).
+Never `--write`. `--resume-last` only from round 2. stderr → `$LOG` (**never `2>/dev/null`**, or
+there's nothing to surface on failure):
 ```
 LOG=$(mktemp)
-REPLY=$(node "$CODEX" task [--cwd "<materials-repo-root>"] "$(cat <<EOF
+REPLY=$(node "$CODEX" task [--resume-last] [--cwd "<materials-repo-root>"] "<prompt body>" 2>"$LOG")
+```
+The prompt body differs by round:
+
+**Round 1 — independent investigation.** No `--resume-last`. MUST NOT contain `CC_TURN` /
+"respond to it" / `### AGREEMENT` (not adversarial yet):
+```
 You and Claude Code are independently reviewing a proposal/change. Reply in <user's language>.
-Raw materials (open and read them yourself — do not assume CC relayed everything):
-- <pointer: branch X vs base / PR #N / spec path / plan.md path>
-- baseline anchor: <base commit / CL number>
-Your role: an evidence-driven independent investigator — if you can run read commands / read the
-real repo, do it. Prefer verification that does NOT write the workspace; if a test fails because
-of read-only write blocks, record it as an environment limitation, not as a fact about the code.
-
-[VCS intake — REQUIRED, output this section first] List the commands you actually ran and key
-output: git status --short, baseline, git diff --stat / diff, and how you handled untracked (??)
-files. If status shows ??, state that you read those untracked files OR ask CC for a snapshot. If
-git is unavailable (safe.directory / permissions / non-git VCS), say so and ask for a snapshot.
-
-Then give your OWN independent deep analysis: key risks, overlooked points, feasibility. Back
-every conclusion with file:line / command output / a reproducible counter-example.
-EOF
-)" 2>"$LOG")
+Raw materials (open and read them yourself — don't assume CC relayed everything):
+- <pointer: branch X vs base / PR #N / spec path / plan.md path>; baseline: <base commit / CL number>
+Role: evidence-driven independent investigator — run read commands / read the real repo. Prefer
+checks that don't write the workspace; a test failing on a read-only write block is an environment
+limitation, not a fact about the code.
+[VCS intake — REQUIRED, output first] commands you ran + key output: git status --short, baseline,
+git diff --stat / diff, and how you handled untracked (??) files. If status shows ??, state you
+read them OR ask for a snapshot. If git is unavailable (safe.directory / perms / non-git VCS), say
+so and ask for a snapshot.
+Then your OWN deep analysis: risks, overlooked points, feasibility. Cite file:line / output / repro.
 ```
 
-### 2b. Codex round N≥2 — adversarial (inject CC's latest turn)
-**Round 2 = symmetric cross-review (mandatory).** Round 2 is the first time the two independent
-round-1 takes meet. Codex already holds its own `codex r1` in warm context (`--resume-last`) but
-has **never seen `cc r1`** — so on round 2 inject `cc r1` explicitly and make Codex cross-review
-it. This closes the asymmetry where CC reviews Codex's r1 but Codex only ever sees CC's rebuttal.
-For round ≥ 3 CC's positions already flow through the turns — inject only the latest turn.
+**Round ≥ 2 — adversarial.** The invariant: **inject every CC turn Codex hasn't seen yet** (via
+`delta`). On round 2 that's *two* turns — `cc r1` (Codex wrote its own r1 blind to it) and the
+latest `cc r2` — so round 2 is a symmetric cross-review; from round 3 on it's just the latest:
 ```
-CC_TURN=$(python "<SK>" delta "$F")              # CC's latest turn (= cc r2 on round 2)
-CC_R1=$(python "<SK>" delta "$F" --role cc --round 1)   # round 2 ONLY — CC's independent take
-LOG=$(mktemp)
-REPLY=$(node "$CODEX" task --resume-last [--cwd "<materials-repo-root>"] "$(cat <<EOF
-Continue the adversarial review. Reply in <user's language>. Speak with execution evidence; back
-every objection with file:line / output / repro. Concede the points that are correct.
-
-[Round 2 only] Below is CC's round-1 INDEPENDENT analysis — you wrote your own r1 without seeing
-it. Cross-review it against your own r1: which of CC's points do you confirm, which do you refute
-(with evidence), and — most important — what did CC flag that you missed?
+CC_TURN=$(python "<SK>" delta "$F")                    # latest CC turn
+CC_R1=$(python "<SK>" delta "$F" --role cc --round 1)  # round 2 only
+```
+```
+Continue the adversarial review. Reply in <user's language>. Cite file:line / output / repro;
+concede what's correct.
+[round 2 only — cross-review the take you never saw] CC's round-1 independent analysis:
 ---
 ${CC_R1}
 ---
-
-This is Claude Code's latest turn; respond to it:
+Which of CC's points do you confirm, which do you refute (evidence), and what did CC catch that you missed?
+This is CC's latest turn; respond to it:
 ---
 ${CC_TURN}
 ---
 Output only your reply body (recorded verbatim). If no substantive objections remain and the
-debate can converge, add a final line: ### AGREEMENT
-EOF
-)" 2>"$LOG")
+debate can converge, end with: ### AGREEMENT
 ```
-Drop the `CC_R1` block and its `[Round 2 only]` paragraph for round ≥ 3.
-stderr goes to `$LOG` — **do not** use `2>/dev/null`, or there is nothing to surface on failure.
 
-**Turn validity — pass all three before appending:**
-- **Transport** — `node` exits zero, doesn't time out, `$REPLY` is non-empty (`append` refuses an empty block as a backstop).
-- **Environment** — the reply shows no block (`Permission denied`, `command not found`, "I don't have access…"); a blocked environment makes the turn untrustworthy.
-- **VCS intake (round 1, mandatory)** — `$REPLY` contains the `VCS intake` section and shows it actually obtained the diff (incl. untracked handling). Missing section / failed commands / unhandled untracked → **invalid turn**.
+**Turn validity — gate before appending, every round:**
+- **Transport** — `node` exits zero, doesn't time out, `$REPLY` non-empty (`append` refuses an empty *or* out-of-order block as a backstop — a skipped turn is blocked at write time, not at `check`).
+- **Environment** — no block sign (`Permission denied`, `command not found`, "I don't have access…").
+- **VCS intake** — round 1 only (the one turn where Codex must prove it obtained the materials itself): `$REPLY` has the `VCS intake` section and shows it got the diff (incl. untracked). Missing / failed / unhandled untracked → **invalid turn**.
 
-Any gate fails → **don't append, don't advance the round.** Surface `$LOG` (the stderr) plus the
-failing command/path to the user; let them decide (retry, switch to snapshot, change `--cwd`,
-continue without Codex, or abort). **If git self-fetch failed or the VCS is Perforce → fall back
-to a snapshot:** CC supplies the `git diff`/`git status` content, or for Perforce the
-`p4 describe -du/-ds` diff content / shelved diff (a CL number + file list is *not* enough).
+Any gate fails → **don't append, don't advance.** Surface `$LOG` + the failing command/path; let
+the user decide (retry / snapshot / change `--cwd` / continue without Codex / abort). **If git
+self-fetch failed or the VCS is Perforce → snapshot fallback:** CC supplies the `git diff`/`git
+status` content, or for Perforce `p4 describe -du/-ds` / shelved diff (a CL number + file list is
+*not* enough).
 
-Once all gates pass, **CC's first action is to append the reply verbatim**, before any analysis:
+Once gates pass, **CC's first action is to append the reply verbatim** (every round, N = the
+current round), before any analysis:
 ```
 printf '%s\n' "$REPLY" | python "<SK>" append "$F" --role codex --round N
 ```
 
-**Resume-drift guard (round ≥ 2):** if another Codex task may be running, or Codex's reply is
-off-context, drop `--resume-last` and instead feed the **exact blocks** in the prompt:
-`delta "$F" --role cc --round 1`, `delta "$F" --role codex --round 1`, the current ledger / open
-crux, and CC's latest turn. Only if tokens are tight, fall back to a CC-written summary labelled
-as such — never make "CC's summary of Codex r1" the default; it re-compresses Codex's independent
-stance.
+**Resume-drift guard (round ≥ 2):** if another Codex task may be running, or the reply is
+off-context, drop `--resume-last` and feed the exact blocks in the prompt instead (`delta` for
+`cc r1`, `codex r1`, the ledger / open crux, and CC's latest turn) — deterministic over warm
+context. Fall back to a *labelled* CC summary only if tokens are tight; never default to "CC's
+summary of Codex r1" (it re-compresses Codex's independent stance).
 
 ### 3. CC rebuttal + ledger (round N+1)
 Update the ledger: mark each objection accepted/rejected/deferred **with evidence**, verifying
 Codex's findings against the project spec/decisions before accepting. Engage the *strongest* open
 objection honestly (no performative agreement). Append CC's turn (`--role cc --round N+1`), then loop
-to **§2b** — unless converged or the cap is hit.
+to **§2** (round ≥ 2 body) — unless converged or the cap is hit.
 
 Convergence = both sides' latest turns carry `### AGREEMENT` **and** the ledger has zero open rows.
 
@@ -203,4 +188,3 @@ cp "$F" "<repo-root>/cc-codex-discussion-history/"
 - `python "<SK>" last "$F"` → `{role, round, blocks}` if you lose track.
 - `--resume-last` resumes the repo's latest Codex task thread; run rounds back-to-back so an
   unrelated job isn't picked up (see the drift guard).
-- Codex read-only can still execute read commands, so repo grounding works without `--write`.
