@@ -26,6 +26,7 @@ Subcommands:
                                       if the block sequence is malformed.
   last <file>                         Print JSON {role,round} of the last block.
   codex-bin                           Print the resolved codex-companion.mjs path (or "").
+                                      Prefers installed_plugins.json's codex installPath; globs as fallback.
 """
 import argparse
 import datetime as _dt
@@ -189,7 +190,36 @@ def cmd_last(args) -> None:
                       "blocks": len(blocks)}))
 
 
+def _manifest_codex_bin():
+    """Authoritative source: the codex plugin's installPath in installed_plugins.json.
+    Returns the codex-companion.mjs path if the manifest records it and the file exists,
+    else None (caller falls back to globbing). Preferring the recorded installPath over a
+    glob avoids returning a stale marketplace copy that shadows the actually-installed
+    plugin, and sidesteps lexical version-sorting of glob hits."""
+    manifest = Path.home() / ".claude" / "plugins" / "installed_plugins.json"
+    try:
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    plugins = data.get("plugins", {}) if isinstance(data, dict) else {}
+    for key, entries in plugins.items():
+        if key.split("@", 1)[0] != "codex":
+            continue
+        for entry in entries if isinstance(entries, list) else []:
+            ip = entry.get("installPath") if isinstance(entry, dict) else None
+            if not ip:
+                continue
+            cand = Path(ip) / "scripts" / "codex-companion.mjs"
+            if cand.is_file():
+                return cand.resolve()
+    return None
+
+
 def cmd_codex_bin(_args) -> None:
+    via_manifest = _manifest_codex_bin()
+    if via_manifest:
+        print(via_manifest)
+        return
     home = Path.home() / ".claude" / "plugins"
     market = sorted(home.glob("marketplaces/*/plugins/codex/scripts/codex-companion.mjs"))
     if market:
