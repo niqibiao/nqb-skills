@@ -14,6 +14,7 @@ marketplace）的结构打包，因此可以一条命令把整套技能添加进
 | Skill | 作用 |
 |---|---|
 | [`cc-codex-discussion`](skills/cc-codex-discussion) | 让 Claude Code 与 Codex CLI 通过一个共享 markdown 文件逐回合对抗式讨论，收敛出一个高置信度、有证据支撑的结论。 |
+| [`ultra-dev`](skills/ultra-dev) | 把一个需求 slice 从 spec 一路推到 merge(spec → 评审 → plan → 评审 → 实现 → 评审 → 文档 → 报告 → merge),按风险分档插对抗式评审门 + 人类停点;运行时发现并委托项目自带的 PR / 决策 / 验证 / 文档同步 / 评审 skill。 |
 
 各 skill 的详细说明、前置要求与用法，见其各自文件夹内的 README。
 
@@ -24,6 +25,7 @@ marketplace）的结构打包，因此可以一条命令把整套技能添加进
 ```
 /plugin marketplace add niqibiao/nqb-skills
 /plugin install cc-codex-discussion
+/plugin install ultra-dev
 ```
 
 （也可以从本地克隆添加：`/plugin marketplace add /path/to/this/repo`。）
