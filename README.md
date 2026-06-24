@@ -14,7 +14,6 @@ do a specialized task; Claude Code loads one on its own when the task matches.
 | Skill | What it does |
 |---|---|
 | [`cc-codex-discussion`](skills/cc-codex-discussion) | Runs a turn-by-turn adversarial discussion between Claude Code and the Codex CLI through a shared markdown file, converging on a high-confidence, evidence-backed conclusion. |
-| [`ultra-dev`](skills/ultra-dev) | Drives a feature slice end-to-end — spec → review → plan → review → implement → review → docs → report → merge — with risk-tiered adversarial review gates and human stops; discovers and delegates to a project's own PR / decision-log / verify / doc-sync / review skills. |
 
 See each skill's own README for details, requirements, and usage.
 
@@ -25,7 +24,6 @@ Add the marketplace, then install the skills you want:
 ```
 /plugin marketplace add niqibiao/nqb-skills
 /plugin install cc-codex-discussion
-/plugin install ultra-dev
 ```
 
 (You can also add it from a local clone: `/plugin marketplace add /path/to/this/repo`.)

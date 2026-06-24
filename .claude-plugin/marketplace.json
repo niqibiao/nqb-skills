@@ -17,15 +17,6 @@
       "skills": [
         "./skills/cc-codex-discussion"
       ]
-    },
-    {
-      "name": "ultra-dev",
-      "description": "Project-agnostic end-to-end slice pipeline (spec -> review -> plan -> review -> implement -> review -> docs -> report -> merge) with risk-tiered adversarial review gates and human stops; discovers and delegates to a project's own PR/decision/verify/doc-sync/review skills.",
-      "source": "./",
-      "strict": false,
-      "skills": [
-        "./skills/ultra-dev"
-      ]
     }
   ]
 }
