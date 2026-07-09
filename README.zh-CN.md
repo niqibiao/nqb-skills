@@ -2,39 +2,60 @@
 
 [English](README.md) · **简体中文**
 
-一组面向 [Claude Code](https://claude.com/claude-code) 的
-[Agent Skills](https://docs.claude.com/en/docs/claude-code/skills)，按插件市场（plugin
-marketplace）的结构打包，因此可以一条命令把整套技能添加进来。
+一组面向 [Claude Code](https://claude.com/claude-code) 及其他兼容 skill 的 agent 的
+[Agent Skills](https://docs.claude.com/en/docs/claude-code/skills)。这些是**纯 skill —— 不走
+plugin、不走 marketplace**,用 [`skills`](https://www.npmjs.com/package/skills) CLI 直接安装。
 
-所谓 *skill*，就是一个由指令（以及可选的脚本/资源）组成的文件夹，用来教 Claude 完成某项专门
-任务；当任务匹配时，Claude Code 会自行加载相应的 skill。
+所谓 *skill*,就是一个由指令(以及可选的脚本/资源)组成的文件夹,用来教 agent 完成某项专门
+任务;当任务匹配时,agent 会自行加载相应的 skill。
 
 ## Skills
 
 | Skill | 作用 |
 |---|---|
-| [`cc-codex-discussion`](skills/cc-codex-discussion) | 让 Claude Code 与 Codex CLI 通过一个共享 markdown 文件逐回合对抗式讨论，收敛出一个高置信度、有证据支撑的结论。 |
+| [`cc-codex-discussion`](skills/cc-codex-discussion) | 让 Claude Code 与 Codex CLI 通过一个共享 markdown 文件逐回合对抗式讨论,收敛出一个高置信度、有证据支撑的结论。 |
+| [`sync-agent-rules`](skills/sync-agent-rules) | 把你的全局 agent 指令文件(`~/.claude/CLAUDE.md` 和 `~/AGENTS.md`)与保存规范副本的 git 仓库互相 pull/push —— pull 覆盖前先备份,push 遇冲突会停下询问。 |
 
-各 skill 的详细说明、前置要求与用法，见其各自文件夹内的 README。
+各 skill 的详细说明、前置要求与用法,见其各自文件夹。
 
 ## 安装
 
-先添加市场，再安装你需要的 skill：
+用 `skills` CLI(`npx skills`),不涉及任何 plugin 机制:
 
-```
-/plugin marketplace add niqibiao/nqb-skills
-/plugin install cc-codex-discussion
+```bash
+# 安装本仓库全部 skill,全局(用户级 → ~/.claude/skills/)
+npx skills add niqibiao/nqb-skills --global
+
+# …或只装进当前项目(→ .claude/skills/)
+npx skills add niqibiao/nqb-skills
+
+# 只装某一个 skill
+npx skills add niqibiao/nqb-skills --skill cc-codex-discussion
+
+# 复制文件而不是软链
+npx skills add niqibiao/nqb-skills --copy
 ```
 
-（也可以从本地克隆添加：`/plugin marketplace add /path/to/this/repo`。）
+之后用 `npx skills list`、`npx skills update`、`npx skills remove` 管理。
+
+不想用 CLI?自己克隆后把 skill 软链进 skills 目录即可 —— 软链是
+[官方支持的](https://code.claude.com/docs/en/skills):
+
+```bash
+git clone https://github.com/niqibiao/nqb-skills.git
+ln -s "$PWD/nqb-skills/skills/cc-codex-discussion" ~/.claude/skills/cc-codex-discussion
+```
 
 ## 目录结构
 
 ```
-.claude-plugin/marketplace.json   # 使本仓库成为可安装的插件市场
-skills/<name>/                    # 每个 skill 一个文件夹（SKILL.md + 可选脚本/资源）
+skills/<name>/          # 每个 skill 一个文件夹
+  └─ SKILL.md           # + 可选的 scripts/、references/
 ```
+
+没有 `.claude-plugin/`、没有 `marketplace.json` —— `skills` CLI(以及手动软链)直接读
+`skills/` 文件夹。
 
 ## 许可证
 
-每个 skill 自带各自的 LICENSE（例如 `cc-codex-discussion` 为 Apache-2.0）。
+每个 skill 自带各自的 LICENSE(例如 `cc-codex-discussion` 为 Apache-2.0)。
