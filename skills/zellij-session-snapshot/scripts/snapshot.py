@@ -167,7 +167,11 @@ def build_manifest(dump):
     for tab, cwd_abs in tabs:
         sid = None
         source = None
-        flags = ["--dangerously-skip-permissions"]
+        # Default to NO flags: never inject flags a tab didn't originally have.
+        # A live match below replaces this with the process's real launch flags;
+        # an inferred tab (dead process) restores with just --resume, so it does
+        # NOT silently gain --dangerously-skip-permissions it never ran with.
+        flags = []
         cand = [s for s in by_cwd.get(cwd_abs, []) if s["pid"] not in used_pids]
         if cand:
             s = cand[0]

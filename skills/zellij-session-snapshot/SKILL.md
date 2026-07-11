@@ -73,7 +73,9 @@ that's the key. Each tab's cwd is then matched to a session:
 2. **`inferred`** — fallback when a tab's claude has already exited (no live
    process). Picks the most recently modified `*.jsonl` under
    `~/.claude/projects/<cwd-with-slashes-as-dashes>/`, excluding claimed ids.
-   Less certain — verify before trusting.
+   Less certain — verify before trusting. Because the original process is gone,
+   its launch flags are unknown, so the tab restores with **just `--resume` and
+   no extra flags** — it does **not** silently gain `--dangerously-skip-permissions`.
 
 Why not `lsof`? Claude doesn't hold the session `.jsonl` open, so the handle
 can't be read from the process. The per-pid runtime file is the reliable source.
