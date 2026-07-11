@@ -31,21 +31,22 @@ executes a separate model and may run read commands in your workspace — review
 
 ## Install
 
-From the marketplace:
-
-```
-/plugin marketplace add niqibiao/nqb-skills
-/plugin install cc-codex-discussion
-```
-
-Or copy the skill directly:
+Uses the [`skills`](https://www.npmjs.com/package/skills) CLI — no plugin system involved:
 
 ```bash
-# macOS / Linux
-cp -r skills/cc-codex-discussion ~/.claude/skills/cc-codex-discussion
+# globally (→ ~/.claude/skills/)
+npx skills add niqibiao/nqb-skills --skill cc-codex-discussion --global
 
-# Windows (PowerShell)
-Copy-Item -Recurse skills\cc-codex-discussion "$env:USERPROFILE\.claude\skills\cc-codex-discussion"
+# …or into the current project only (→ .claude/skills/)
+npx skills add niqibiao/nqb-skills --skill cc-codex-discussion
+```
+
+Prefer no CLI? Clone and symlink it in — symlinks are
+[officially supported](https://code.claude.com/docs/en/skills):
+
+```bash
+git clone https://github.com/niqibiao/nqb-skills.git
+ln -s "$PWD/nqb-skills/skills/cc-codex-discussion" ~/.claude/skills/cc-codex-discussion
 ```
 
 ## Usage
