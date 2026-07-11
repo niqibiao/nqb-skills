@@ -15,6 +15,7 @@ plugin、不走 marketplace**,用 [`skills`](https://www.npmjs.com/package/skill
 |---|---|
 | [`cc-codex-discussion`](skills/cc-codex-discussion) | 让 Claude Code 与 Codex CLI 通过一个共享 markdown 文件逐回合对抗式讨论,收敛出一个高置信度、有证据支撑的结论。 |
 | [`sync-agent-rules`](skills/sync-agent-rules) | 把你的全局 agent 指令文件(`~/.claude/CLAUDE.md` 和 `~/AGENTS.md`)与保存规范副本的 git 仓库互相 pull/push —— pull 覆盖前先备份,push 遇冲突会停下询问。 |
+| [`zellij-session-snapshot`](skills/zellij-session-snapshot) | 把 zellij 会话的各个 tab 连同其中运行的 Claude Code 会话一起快照,重启/登出后一条命令即可恢复所有 tab 并接续每个 tab 原本的 Claude 对话。 |
 
 各 skill 的详细说明、前置要求与用法,见其各自文件夹。
 

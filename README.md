@@ -15,6 +15,7 @@ to do a specialized task; the agent loads one on its own when the task matches.
 |---|---|
 | [`cc-codex-discussion`](skills/cc-codex-discussion) | Runs a turn-by-turn adversarial discussion between Claude Code and the Codex CLI through a shared markdown file, converging on a high-confidence, evidence-backed conclusion. |
 | [`sync-agent-rules`](skills/sync-agent-rules) | Pull/push your global agent instruction files (`~/.claude/CLAUDE.md` and `~/AGENTS.md`) to/from a git repo that holds the canonical copy — backs up before overwriting on pull, stops and asks on push conflicts. |
+| [`zellij-session-snapshot`](skills/zellij-session-snapshot) | Snapshots a zellij session's tabs together with the Claude Code conversation running in each, then restores every tab and resumes its exact Claude session after a reboot/logout with one command. |
 
 See each skill's own folder for details, requirements, and usage.
 
