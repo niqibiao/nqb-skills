@@ -42,7 +42,7 @@ Set `SCRIPT="$HOME/.claude/skills/sync-agent-rules/scripts/sync_agent_rules.py"`
 
 ## First use — get the repo address
 
-If `~/.claude/agents-sync/config.json` does not exist, the tool isn't set up yet
+If `~/.agents/config.json` does not exist, the tool isn't set up yet
 (any command except `init` exits with code **2**). Ask the user for the repo address,
 then initialize:
 
@@ -102,10 +102,13 @@ and whether the `~/.claude/CLAUDE.md` stub is in place.
 
 ## Authentication
 
-The tool reuses the system's git credentials — it never stores tokens. If a command
-exits with code **4** (AUTH/NETWORK), the repo is unreachable or the credential isn't
-cached. Tell the user to set up a git credential helper for that host and authenticate
-once, e.g.:
+The clone/fetch/push logic is **protocol-agnostic** — the repo URL can be an **SSH**
+remote (`git@host:owner/repo.git` / `ssh://git@host:port/owner/repo.git`) or an
+**HTTP/HTTPS** remote. The tool reuses the system's git credentials and never stores
+tokens; only the auth prerequisite differs. If a command exits with code **4**
+(AUTH/NETWORK), the repo is unreachable or auth failed — pick the matching fix:
+
+**HTTP/HTTPS repo** — set up a git credential helper for that host and authenticate once:
 
 ```
 # pick the helper for the OS:
@@ -114,6 +117,18 @@ once, e.g.:
 #   Linux:   git config --global credential.helper store
 git ls-remote <repo-url>   # prompts once, then caches
 ```
+
+Beware a helper that *hangs* (e.g. Gitea's `!tea login helper`): every git call is
+bounded at 60s and will report the timeout as code 4, but the real fix is to use an SSH
+remote or remove the blocking helper for that host.
+
+**SSH repo** — make sure the key works and the host is trusted:
+
+```
+ssh -T git@github.com      # expect "successfully authenticated"
+```
+
+Add the key to your ssh-agent and the host to known_hosts if it fails.
 
 Then retry the command.
 

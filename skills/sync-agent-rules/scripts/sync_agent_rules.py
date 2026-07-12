@@ -6,7 +6,7 @@ The repo holds ONE canonical instructions file. `pull` overwrites every local ta
 with it (backing up first); `push` sends one local source file up and refuses to
 clobber remote changes silently.
 
-State lives under ~/.claude/agents-sync/ (a config.json + a private git working copy),
+State lives under ~/.agents/ (a config.json + a private git working copy),
 so it survives skill updates and never touches the user's real files except the targets.
 
 Exit codes: 0 ok | 1 error | 2 not-initialized | 3 conflict (caller must ask user) | 4 auth/network
@@ -15,9 +15,14 @@ import argparse, json, os, shutil, subprocess, sys
 from datetime import datetime
 
 HOME = os.path.expanduser("~")
-BASE = os.path.join(HOME, ".claude", "agents-sync")
+BASE = os.path.join(HOME, ".agents")
 CONFIG_PATH = os.path.join(BASE, "config.json")
 REPO = os.path.join(BASE, "repo")
+
+# Every git call is bounded: a hanging credential helper (e.g. a `tea`/gh helper
+# bound to the repo's host) would otherwise block forever with no output. On timeout
+# we kill git and report code 4 instead of leaving the caller staring at a dead prompt.
+GIT_TIMEOUT = 60
 
 # Only AGENTS.md is synced with full content. CLAUDE.md is a one-line stub that
 # imports it (see DEFAULT_STUB / ensure_stub), so the two never hold duplicate copies.
@@ -49,19 +54,33 @@ def save_config(cfg):
 def git(args, cwd=REPO, check=True):
     """Run git non-interactively (no credential prompts that would hang)."""
     env = dict(os.environ, GIT_TERMINAL_PROMPT="0")
-    r = subprocess.run(["git", *args], cwd=cwd, env=env,
-                       capture_output=True, text=True)
+    try:
+        r = subprocess.run(["git", *args], cwd=cwd, env=env,
+                           capture_output=True, text=True, timeout=GIT_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        die(f"TIMEOUT: git {' '.join(args)} did not finish within {GIT_TIMEOUT}s.\n"
+            "A credential helper or network call is likely hanging. Check for a helper "
+            "bound to this repo's host that blocks:\n"
+            "  git config --show-origin --get-all credential.helper\n"
+            "e.g. a `!tea login helper` line for a Gitea host. Use an SSH remote or "
+            "remove the hanging helper for that host.", 4)
     if check and r.returncode != 0:
         out = (r.stdout + r.stderr).lower()
+        # Cover both HTTP(S) credential failures and SSH key / host-key failures,
+        # so an SSH remote's auth error is classified as AUTH/NETWORK, not a generic error.
         if any(w in out for w in ("authentication", "403", "401", "could not read",
-                                  "terminal prompts disabled", "connection", "resolve host")):
+                                  "terminal prompts disabled", "connection", "resolve host",
+                                  "permission denied", "publickey", "host key verification")):
             die("AUTH/NETWORK: git could not reach or authenticate to the repo.\n"
                 + r.stdout + r.stderr +
-                "\nHint: configure a git credential helper for this host, e.g.\n"
+                "\nHint (HTTP/HTTPS repo): configure a git credential helper for this host, e.g.\n"
                 "  macOS:   git config --global credential.helper osxkeychain\n"
                 "  Windows: git config --global credential.helper manager\n"
                 "  Linux:   git config --global credential.helper store\n"
-                "then run any git clone/pull against the repo once to cache the token.", 4)
+                "then run any git clone/pull against the repo once to cache the token.\n"
+                "Hint (SSH repo): make sure your key is loaded and the host is trusted, e.g.\n"
+                "  ssh -T git@github.com   (expect 'successfully authenticated')\n"
+                "add the key to your ssh-agent, and the host to known_hosts, if that fails.", 4)
         die(f"git {' '.join(args)} failed:\n{r.stdout}{r.stderr}")
     return r
 
