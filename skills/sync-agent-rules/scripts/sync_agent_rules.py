@@ -193,7 +193,7 @@ def cmd_pull(args):
 
 def cmd_push(args):
     cfg = _require_cfg()
-    source = os.path.expanduser(args.source or cfg["push_source"])
+    source = os.path.expanduser(cfg["push_source"])
     if not os.path.exists(source):
         die(f"Push source not found: {source}")
     new = read(source)
@@ -306,7 +306,6 @@ def main():
     pp = sub.add_parser("pull"); pp.set_defaults(func=cmd_pull)
 
     ph = sub.add_parser("push")
-    ph.add_argument("--source", help="override the local file to push")
     ph.add_argument("--overwrite-remote", action="store_true",
                     help="make local win even if remote has diverged")
     ph.set_defaults(func=cmd_push)
