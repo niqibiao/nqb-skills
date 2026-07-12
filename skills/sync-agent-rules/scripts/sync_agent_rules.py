@@ -19,8 +19,14 @@ BASE = os.path.join(HOME, ".claude", "agents-sync")
 CONFIG_PATH = os.path.join(BASE, "config.json")
 REPO = os.path.join(BASE, "repo")
 
-DEFAULT_TARGETS = [os.path.join(HOME, ".claude", "CLAUDE.md"),
-                   os.path.join(HOME, "AGENTS.md")]
+# Only AGENTS.md is synced with full content. CLAUDE.md is a one-line stub that
+# imports it (see DEFAULT_STUB / ensure_stub), so the two never hold duplicate copies.
+DEFAULT_TARGETS = [os.path.join(HOME, "AGENTS.md")]
+
+# ~/.claude/CLAUDE.md is kept as `@~/AGENTS.md` — Claude Code resolves @-imports
+# relative to the importing file, so the absolute ~/ form is required to reach ~/AGENTS.md.
+DEFAULT_STUB = {"path": os.path.join(HOME, ".claude", "CLAUDE.md"),
+                "import": "~/AGENTS.md"}
 
 
 # ---------- helpers ----------
@@ -52,7 +58,9 @@ def git(args, cwd=REPO, check=True):
             die("AUTH/NETWORK: git could not reach or authenticate to the repo.\n"
                 + r.stdout + r.stderr +
                 "\nHint: configure a git credential helper for this host, e.g.\n"
-                "  git config --global credential.helper osxkeychain\n"
+                "  macOS:   git config --global credential.helper osxkeychain\n"
+                "  Windows: git config --global credential.helper manager\n"
+                "  Linux:   git config --global credential.helper store\n"
                 "then run any git clone/pull against the repo once to cache the token.", 4)
         die(f"git {' '.join(args)} failed:\n{r.stdout}{r.stderr}")
     return r
@@ -74,6 +82,25 @@ def show_remote_file(branch, fname):
 
 def ts():
     return datetime.now().strftime("%Y%m%d-%H%M%S")
+
+def ensure_stub(cfg):
+    """Make ~/.claude/CLAUDE.md a one-line `@<import>` stub that pulls in AGENTS.md.
+    Idempotent; backs up any pre-existing content before replacing it."""
+    stub = cfg.get("stub")
+    if not stub:
+        return
+    path = os.path.expanduser(stub["path"])
+    line = "@" + stub["import"]
+    if os.path.exists(path) and read(path).decode(errors="replace").strip() == line:
+        return
+    if os.path.exists(path):
+        bak = f"{path}.bak.{ts()}"
+        shutil.copy2(path, bak)
+        print(f"  backed up {path} -> {bak}")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        f.write(line + "\n")
+    print(f"  wrote stub {path} -> {line}")
 
 
 # ---------- commands ----------
@@ -107,13 +134,16 @@ def cmd_init(args):
         "repo_file": repo_file,
         "targets": targets,
         "push_source": args.push_source or targets[-1],
+        "stub": DEFAULT_STUB,
     }
     save_config(cfg)
+    ensure_stub(cfg)
     exists = os.path.exists(os.path.join(REPO, repo_file))
     print("Initialized.")
     print(f"  repo_file   : {repo_file}" + ("" if exists else "  (not in repo yet — will be created on first push)"))
     print(f"  targets     : {', '.join(targets)}")
     print(f"  push_source : {cfg['push_source']}")
+    print(f"  stub        : {cfg['stub']['path']} -> @{cfg['stub']['import']}")
 
 def _require_cfg():
     cfg = load_config()
@@ -151,6 +181,8 @@ def cmd_pull(args):
         with open(t, "wb") as f:
             f.write(new)
         changed.append(t)
+
+    ensure_stub(cfg)
 
     if changed:
         print("Updated: " + ", ".join(changed))
@@ -245,6 +277,18 @@ def cmd_status(args):
     existing = [os.path.expanduser(t) for t in cfg["targets"] if os.path.exists(os.path.expanduser(t))]
     if len(existing) >= 2 and len({read(t) for t in existing}) > 1:
         print("\nNote: your local targets differ from EACH OTHER — decide which to push as source.")
+
+    stub = cfg.get("stub")
+    if stub:
+        path = os.path.expanduser(stub["path"])
+        line = "@" + stub["import"]
+        if not os.path.exists(path):
+            state = "MISSING (run pull/init to create)"
+        elif read(path).decode(errors="replace").strip() == line:
+            state = f"stub -> {line}"
+        else:
+            state = "NOT a stub (holds other content)"
+        print(f"\nCLAUDE.md stub:\n  {path}: {state}")
 
 
 def main():

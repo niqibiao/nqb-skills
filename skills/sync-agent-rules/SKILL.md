@@ -18,15 +18,21 @@ description: >-
 
 # sync-agent-rules
 
-Keeps the two user-level agent instruction files in sync with a remote git repo that
-stores **one canonical copy**:
+Keeps the user-level agent instructions in sync with a remote git repo that stores
+**one canonical copy**. There is a single source of truth locally too:
 
-- `~/.claude/CLAUDE.md` — Claude Code's global instructions
-- `~/AGENTS.md` — the AGENTS-style instructions used by other agents
+- `~/AGENTS.md` — the full canonical instructions (the only file that is synced)
+- `~/.claude/CLAUDE.md` — a one-line stub `@~/AGENTS.md` that imports it, so Claude
+  Code loads the same rules without keeping a duplicate copy
 
-The repo (any git repo, e.g. a Gitea/GitHub repo like `…/you/AGENTS`) holds a single file. **Pull**
-overwrites both local files with it (backing each up first). **Push** sends one local
-file up and refuses to silently clobber remote changes.
+The repo (any git repo, e.g. a Gitea/GitHub repo like `…/you/AGENTS`) holds a single file.
+**Pull** overwrites `~/AGENTS.md` with it (backing it up first) and (re)writes the CLAUDE.md
+stub. **Push** sends `~/AGENTS.md` up and refuses to silently clobber remote changes.
+
+> The `@~/AGENTS.md` stub uses an **absolute** path on purpose: Claude Code resolves
+> `@`-imports relative to the importing file, so a bare `@AGENTS.md` inside
+> `~/.claude/CLAUDE.md` would look for `~/.claude/AGENTS.md` (wrong file). `init` and
+> `pull` manage this stub for you — you don't edit it by hand.
 
 All git plumbing lives in `scripts/sync_agent_rules.py`. Your job is to run the right
 subcommand and handle the two moments that need a human: first-time setup and conflicts.
@@ -47,7 +53,8 @@ python3 "$SCRIPT" init --repo-url <URL>
 The URL is a normal git clone URL (e.g. `https://your-git-host.example/you/AGENTS.git`, or an
 SSH URL like `ssh://git@your-git-host.example:22/you/AGENTS.git`).
 `init` clones it, auto-detects the canonical filename (`AGENTS.md`, else `CLAUDE.md`,
-else `AGENTS.md` to be created on first push), and records the two local targets.
+else `AGENTS.md` to be created on first push), records `~/AGENTS.md` as the local
+target, and writes the `~/.claude/CLAUDE.md` stub (backing up anything already there).
 **Don't guess the URL** — the user must supply it.
 
 ## Feature 1 — Pull (repo → local)
@@ -58,9 +65,10 @@ When the user wants the latest instructions:
 python3 "$SCRIPT" pull
 ```
 
-This resets the working copy to the remote, then overwrites every local target with the
-canonical file, saving a timestamped `.bak` of anything it replaces. Report which files
-were updated (and mention the backups so the user knows edits are recoverable).
+This resets the working copy to the remote, then overwrites `~/AGENTS.md` with the
+canonical file and ensures the `~/.claude/CLAUDE.md` stub is in place, saving a timestamped
+`.bak` of anything it replaces. Report which files were updated (and mention the backups so
+the user knows edits are recoverable).
 
 ## Feature 2 — Push (local → repo)
 
@@ -70,8 +78,8 @@ When the user wants to publish their local edits:
 python3 "$SCRIPT" push
 ```
 
-By default it pushes `~/AGENTS.md` (the recorded `push_source`). If the user clearly
-means the other file, pass `--source ~/.claude/CLAUDE.md`.
+It pushes `~/AGENTS.md` (the recorded `push_source`) — the single canonical file.
+(`~/.claude/CLAUDE.md` is just a stub and is never pushed.)
 
 **Handling conflicts (exit code 3).** If the remote changed since the last sync and its
 content differs from what's being pushed, the tool prints `CONFLICT`, shows a diff, and
@@ -83,18 +91,14 @@ let them choose:
 - **Take the remote version instead** → run `pull` (this backs up and overwrites local).
 - **Merge by hand** → they can edit the file, then push again.
 
-**Local divergence.** The two local files may differ from each other. If the user hasn't
-said which to push and it matters, run `status` and ask which file is the source of truth
-before pushing.
-
 ## Checking state
 
 ```
 python3 "$SCRIPT" status
 ```
 
-Shows the repo URL, canonical filename, whether each local target is in sync with the
-remote, and whether the two local files disagree with each other.
+Shows the repo URL, canonical filename, whether `~/AGENTS.md` is in sync with the remote,
+and whether the `~/.claude/CLAUDE.md` stub is in place.
 
 ## Authentication
 
@@ -104,7 +108,10 @@ cached. Tell the user to set up a git credential helper for that host and authen
 once, e.g.:
 
 ```
-git config --global credential.helper osxkeychain
+# pick the helper for the OS:
+#   macOS:   git config --global credential.helper osxkeychain
+#   Windows: git config --global credential.helper manager
+#   Linux:   git config --global credential.helper store
 git ls-remote <repo-url>   # prompts once, then caches
 ```
 
