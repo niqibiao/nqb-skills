@@ -107,6 +107,15 @@ user's default layout, so without the template the restored session comes up wit
 carry no geometry, so terminal-fit still holds. Every non-`--resume` flag on the
 pane (`--dangerously-skip-permissions`, `--model`, …) is preserved.
 
+**Windows**: each pane launches claude through `scripts/conwrap.ps1` instead of
+directly. zellij-on-Windows command panes hand the child PIPE std handles even
+though a ConPTY console is attached (and is the only thing the pane renders), so
+a directly-launched claude sees no TTY, drops into headless mode, and `--resume`
+exits immediately with "Provide a prompt to continue the conversation". The
+wrapper reopens CONIN$/CONOUT$ read-write (a `< CON > CON` redirect is not
+enough — GetConsoleMode needs read access) and hands them to claude via
+STARTF_USESTDHANDLES, restoring interactive mode.
+
 ## The intended flow
 
 ```

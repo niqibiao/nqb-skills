@@ -24,6 +24,7 @@ import glob
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -31,10 +32,105 @@ import time
 HOME = os.path.expanduser("~")
 SNAP_ROOT = os.path.join(HOME, ".claude", "zellij-snapshots")
 PROJECTS = os.path.join(HOME, ".claude", "projects")
+IS_WIN = sys.platform == "win32"
 
 
 def run(cmd):
     return subprocess.run(cmd, capture_output=True, text=True)
+
+
+# --- Windows helpers -------------------------------------------------------
+# POSIX behaviour is unchanged: these are no-ops on non-Windows paths (which
+# contain no backslashes and are already case-canonical).
+
+def _deescape_kdl_path(p):
+    r"""zellij dumps a cwd as a KDL string literal, so a Windows path comes out
+    double-escaped (C:\Users -> C:\\Users). Undo that. No-op on POSIX."""
+    return p.replace("\\\\", "\\") if p else p
+
+
+def _kdl_escape(s):
+    r"""Backslashes in a KDL string literal must be doubled or zellij's parser
+    rejects the layout (\U in C:\Users is an invalid escape). No-op on POSIX."""
+    return s.replace("\\", "\\\\") if IS_WIN else s
+
+
+def _norm(p):
+    """Canonical form for comparing two cwds. normcase folds Windows' case- and
+    separator-insensitivity (and is the identity on POSIX), so the same dir seen
+    from a pid file and from dump-layout compares equal."""
+    return os.path.normcase(os.path.normpath(p)) if p else p
+
+
+def _cim_claude_procs():
+    """Windows: {pid: command line} for every live claude.exe, in one call.
+    Replaces both `pgrep` (liveness) and per-pid `ps -o command=` (flags)."""
+    script = ("@(Get-CimInstance Win32_Process -Filter \"Name='claude.exe'\" | "
+              "Select-Object ProcessId,CommandLine) | ConvertTo-Json -Compress")
+    r = run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script])
+    out = (r.stdout or "").strip()
+    if not out:
+        return {}
+    try:
+        data = json.loads(out)
+    except Exception:
+        return {}
+    if data is None:
+        return {}
+    if isinstance(data, dict):        # ConvertTo-Json emits a bare object for 1
+        data = [data]
+    procs = {}
+    for d in data:
+        pid = d.get("ProcessId")
+        if pid is not None:
+            procs[int(pid)] = d.get("CommandLine") or ""
+    return procs
+
+
+def _running_claude_sessions_windows():
+    """Windows counterpart of running_claude_sessions(). Same shape, but liveness
+    + cmdline come from one CIM call, and — unlike POSIX — non-interactive
+    claude.exe (daemon / bg-pty-host / fork-session, which also write runtime
+    files) are excluded via the runtime file's `kind` field, so they can't win a
+    cwd match and resolve a tab to the wrong session."""
+    procs = _cim_claude_procs()
+    sessions = []
+    for f in glob.glob(os.path.join(HOME, ".claude", "sessions", "*.json")):
+        try:
+            pid = int(os.path.splitext(os.path.basename(f))[0])
+        except ValueError:
+            continue
+        if pid not in procs:
+            continue
+        try:
+            with open(f) as fh:
+                d = json.load(fh)
+        except Exception:
+            continue
+        if d.get("kind") != "interactive":
+            continue
+        if d.get("sessionId") and d.get("cwd"):
+            toks = procs.get(pid, "").split()
+            flags = []
+            skip = False
+            for tok in toks[1:]:
+                if skip:
+                    skip = False
+                    continue
+                if tok == "--resume":
+                    skip = True
+                    continue
+                if tok in ("--continue", "-c"):
+                    # Conflicts with the --resume <sid> we inject on restore:
+                    # --continue reopens the *latest* conversation, not this one.
+                    continue
+                flags.append(tok)
+            sessions.append({"pid": pid,
+                             "sessionId": d["sessionId"],
+                             "cwd": os.path.normpath(d["cwd"]),
+                             "started": d.get("startedAt", 0),
+                             "flags": flags})
+    return sessions
 
 
 def current_session():
@@ -46,15 +142,34 @@ def current_session():
     return name
 
 
-def dump_layout():
-    r = run(["zellij", "action", "dump-layout"])
+def dump_layout(session=None):
+    # Windows: an implicit `action dump-layout` returns only the plugin-pane
+    # skeleton — no command=/cwd= on the content panes — so we MUST target the
+    # session explicitly to get a runtime dump with cwds. POSIX is unchanged.
+    if IS_WIN and session:
+        cmd = ["zellij", "--session", session, "action", "dump-layout"]
+    else:
+        cmd = ["zellij", "action", "dump-layout"]
+    r = run(cmd)
     if r.returncode != 0:
+        if IS_WIN:
+            return None   # unreachable session -> caller synthesizes from runtime files
         sys.exit(f"`zellij action dump-layout` failed:\n{r.stderr}")
-    return r.stdout
+    out = r.stdout
+    # A KDL dump always begins at `layout {`; on Windows zellij may prepend
+    # shell-banner noise. Trim it. No-op on a clean POSIX dump (idx == 0).
+    idx = out.find("layout {")
+    return out[idx:] if idx > 0 else out
 
 
 def project_dir_for(cwd_abs):
-    return os.path.join(PROJECTS, cwd_abs.replace("/", "-"))
+    if IS_WIN:
+        # Claude names project dirs by replacing every non-alnum char (drive
+        # colon, backslash, dot, space) with '-': C:\Users\niqib -> C--Users-niqib.
+        slug = re.sub(r"[^A-Za-z0-9]", "-", os.path.normpath(cwd_abs))
+    else:
+        slug = cwd_abs.replace("/", "-")
+    return os.path.join(PROJECTS, slug)
 
 
 def latest_session_id(cwd_abs, exclude=frozenset()):
@@ -77,6 +192,8 @@ def running_claude_sessions():
     reflects the session in use right now (survives --resume-less launches and
     /clear), unlike the layout's launch-time args. Stale files for dead pids
     are filtered out via pgrep."""
+    if IS_WIN:
+        return _running_claude_sessions_windows()
     r = run(["pgrep", "-x", "claude"])
     live = {int(x) for x in r.stdout.split()} if r.returncode == 0 else set()
     sessions = []
@@ -136,7 +253,7 @@ def parse_tabs(dump):
     top_cwd = HOME
     m = re.search(r'^\s*cwd\s+"([^"]+)"', "\n".join(lines[:5]), re.M)
     if m:
-        top_cwd = m.group(1)
+        top_cwd = _deescape_kdl_path(m.group(1))
     tabs = []
     have_content = False
     for line in lines:
@@ -147,7 +264,8 @@ def parse_tabs(dump):
             continue
         if tabs and not have_content and "command=" in line and "plugin" not in line:
             cm = re.search(r'cwd="([^"]+)"', line)
-            tabs[-1][1] = abs_cwd(top_cwd, cm.group(1) if cm else None)
+            pane_cwd = _deescape_kdl_path(cm.group(1)) if cm else None
+            tabs[-1][1] = abs_cwd(top_cwd, pane_cwd)
             have_content = True
     return [(name, cwd or top_cwd) for name, cwd in tabs if name]
 
@@ -160,7 +278,7 @@ def build_manifest(dump):
     live = running_claude_sessions()
     by_cwd = {}
     for s in sorted(live, key=lambda x: x["started"]):
-        by_cwd.setdefault(s["cwd"], []).append(s)
+        by_cwd.setdefault(_norm(s["cwd"]), []).append(s)
     used_pids = set()
     used_sids = set()
     manifest = []
@@ -172,7 +290,7 @@ def build_manifest(dump):
         # an inferred tab (dead process) restores with just --resume, so it does
         # NOT silently gain --dangerously-skip-permissions it never ran with.
         flags = []
-        cand = [s for s in by_cwd.get(cwd_abs, []) if s["pid"] not in used_pids]
+        cand = [s for s in by_cwd.get(_norm(cwd_abs), []) if s["pid"] not in used_pids]
         if cand:
             s = cand[0]
             sid = s["sessionId"]
@@ -188,6 +306,39 @@ def build_manifest(dump):
         manifest.append({"tab": tab, "cwd": cwd_abs, "session_id": sid,
                          "args": args, "source": source})
     return manifest
+
+
+def _fallback_manifest():
+    """Windows fallback for when the session can't be dumped (not discoverable by
+    a new client — e.g. its temp registry file was cleaned up while the server
+    keeps running). Synthesize one tab per LIVE interactive claude on the machine,
+    straight from the runtime files. This is NOT the session's real tab layout —
+    it's every live claude — but it preserves the conversations, which is the
+    whole point of the snapshot."""
+    manifest = []
+    for x in running_claude_sessions():
+        sid = x["sessionId"]
+        name = os.path.basename(x["cwd"].rstrip("\\/")) or x["cwd"]
+        manifest.append({"tab": name, "cwd": x["cwd"], "session_id": sid,
+                         "args": ["--resume", sid] + list(x["flags"]),
+                         "source": "runtime"})
+    return manifest
+
+
+def claude_pane_command():
+    """(command, prefix_args) for launching claude in a zellij pane.
+
+    On Windows, zellij command panes hand the child PIPE std handles even though
+    a ConPTY console is attached (and is all the pane renders) — claude sees no
+    TTY, drops into headless mode, and `--resume` exits immediately. Launch it
+    through conwrap.ps1, which rebinds fd 0/1/2 to CONIN$/CONOUT$ (read-write,
+    inheritable) before spawning claude, restoring interactive mode."""
+    if not IS_WIN:
+        return "claude", []
+    pwsh = shutil.which("pwsh") or shutil.which("powershell") or "powershell"
+    wrapper = os.path.join(os.path.dirname(os.path.abspath(__file__)), "conwrap.ps1")
+    claude = shutil.which("claude") or "claude"
+    return pwsh, ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", wrapper, claude]
 
 
 def minimal_layout(manifest):
@@ -212,12 +363,13 @@ def minimal_layout(manifest):
         "        }",
         "    }",
     ]
+    command, prefix = claude_pane_command()
     for t in manifest:
-        args = t.get("args") or []
-        quoted = " ".join(f'"{a}"' for a in args)
-        cwd = f' cwd="{t["cwd"]}"' if t.get("cwd") else ""
+        args = prefix + (t.get("args") or [])
+        quoted = " ".join(f'"{_kdl_escape(a)}"' for a in args)
+        cwd = f' cwd="{_kdl_escape(t["cwd"])}"' if t.get("cwd") else ""
         lines.append(f'    tab name="{t["tab"]}" {{')
-        lines.append(f'        pane command="claude"{cwd} {{')
+        lines.append(f'        pane command="{_kdl_escape(command)}"{cwd} {{')
         if quoted:
             lines.append(f"            args {quoted}")
         lines.append(f"            start_suspended true")
@@ -231,13 +383,23 @@ def config_layout_path(session):
     """Named-layout path in zellij's config dir. This is CONFIG, not cache:
     zellij only reads it, never overwrites it on serialization. Restore with
     `zellij --session <s> --layout <s>`."""
+    if IS_WIN:
+        base = os.environ.get("APPDATA", os.path.join(HOME, "AppData", "Roaming"))
+        return os.path.join(base, "Zellij", "config", "layouts", f"{session}.kdl")
     return os.path.join(HOME, ".config", "zellij", "layouts", f"{session}.kdl")
 
 
 def cmd_save(args):
     session = args.session or current_session()
-    layout = dump_layout()
-    manifest = build_manifest(layout)
+    layout = dump_layout(session)
+    if layout is None:
+        # Windows: session not reachable by a new client. Fall back to a
+        # conversation-level snapshot synthesized from runtime files.
+        manifest = _fallback_manifest()
+        fallback = True
+    else:
+        manifest = build_manifest(layout)
+        fallback = False
     resumable = [m for m in manifest if m["session_id"]]
 
     # Safety guard: never overwrite good snapshots with an empty/degraded one.
@@ -280,11 +442,15 @@ def cmd_save(args):
 
     claude_tabs = [m for m in manifest if m["session_id"]]
     print(f"✅ Saved snapshot of session '{session}' ({stamp})")
+    if fallback:
+        print(f"   ⚠ '{session}' wasn't reachable via zellij — synthesized from live claude")
+        print(f"     runtime files: tabs = every live interactive claude on this machine,")
+        print(f"     not '{session}'s real tab layout.")
     print(f"   {len(manifest)} claude tab(s), {len(claude_tabs)} with a resumable session:\n")
     for m in manifest:
         sid = m["session_id"] or "(no session found — will start fresh)"
         tag = {"process": "live ✓", "layout-stale": "stale?",
-               "inferred": "inferred"}.get(m["source"], "-")
+               "inferred": "inferred", "runtime": "live (synth)"}.get(m["source"], "-")
         extra = [a for a in m.get("args", [])
                  if a != "--resume" and a != m["session_id"]]
         print(f"   • {m['tab']:<18} {m['cwd']}")
@@ -314,8 +480,24 @@ def spawn_background(session):
     # stale resurrection. Skip if we're currently inside that session.
     if os.environ.get("ZELLIJ_SESSION_NAME") != session:
         run(["zellij", "delete-session", session, "--force"])
-    run(["zellij", "--new-session-with-layout", layout_ref,
-         "attach", "--create-background", session])
+        if IS_WIN:
+            # delete-session returns before the session is actually gone here,
+            # so the create below would collide with the old same-name session.
+            # Wait until list-sessions no longer shows it.
+            for _ in range(20):
+                if session not in run(["zellij", "list-sessions"]).stdout:
+                    break
+                time.sleep(0.25)
+    create = ["zellij", "--new-session-with-layout", layout_ref,
+              "attach", "--create-background", session]
+    if IS_WIN:
+        # This call detaches a background process that inherits our stdio; the
+        # capturing run() would block forever on a pipe that never closes. Send
+        # all three streams to DEVNULL so nothing is inherited to wait on.
+        subprocess.run(create, stdin=subprocess.DEVNULL,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    else:
+        run(create)
     return session in run(["zellij", "list-sessions"]).stdout
 
 
@@ -338,11 +520,12 @@ def cmd_restore(args):
         with open(manifest_path) as f:
             meta = json.load(f)
         made = 0
+        command, prefix = claude_pane_command()
         for t in meta["tabs"]:
             cmd = ["zellij", "action", "new-tab", "--name", t["tab"]]
             if t.get("cwd"):
                 cmd += ["--cwd", t["cwd"]]
-            cmd += ["--", "claude"] + list(t.get("args", []))
+            cmd += ["--", command] + prefix + list(t.get("args", []))
             if run(cmd).returncode == 0:
                 made += 1
         print(f"✅ Injected {made}/{len(meta['tabs'])} tab(s) into '{in_zellij}'.")
