@@ -8,25 +8,32 @@ reboot/logout with one command.
 Zellij's own resurrection re-runs `claude` fresh and loses which conversation each tab was on;
 this skill closes that gap.
 
-- **`save`** — snapshot the current session (run it from inside the session you want to keep).
-  Writes a minimal restorable layout + manifest and installs it as a **named layout** in
+- **`save`** — snapshot a session (default `$ZELLIJ_SESSION_NAME`, or `--session <name>` from
+  anywhere). Writes a minimal restorable layout + manifest and installs it as a **named layout** in
   `~/.config/zellij/layouts/<name>.kdl`. Refuses to overwrite a good snapshot when run from an
   unhealthy session.
-- **`restore` / `spawn`** — recreate the session from the named layout, created **detached in the
-  background** so it works even from a non-tty cc pane after a reboot; then `zellij attach <name>`.
+- **`restore`** — **prints a doctor + the exact commands to run by hand; it does not spawn
+  anything.** Auto-spawning a zellij server from inside a claude pane makes restored panes inherit
+  a non-persisting child session (transcripts stop saving), so restore is deliberately launched
+  from a fresh terminal. (`spawn` is a deprecated alias that redirects to the doctor.)
 - **`show`** — print the saved manifest (tab, cwd, session id, source, args).
 
-Each tab's Claude session is matched by its **cwd** (not its pane command, which zellij
-mis-reports). See [`SKILL.md`](SKILL.md) for the full resolution mechanism and its honest
-limitations.
+Each tab's Claude session is resolved by asking the OS directly — no hook, no setup: Claude's
+per-process runtime files (`~/.claude/sessions/<pid>.json`) are joined with zellij's pane table on
+the **pane id** carried in each claude process's environment (read exactly via Darwin's
+`KERN_PROCARGS2`), with the process identity-validated (start time, argv, descent from this
+session's `zellij --server`). Same-cwd tabs stay distinct and the id is correct even after
+`/clear`. Identity failures abort the save (fail closed). See [`SKILL.md`](SKILL.md) for the full
+mechanism and its honest limitations.
 
 Released under the Apache License 2.0 (see [`LICENSE.txt`](LICENSE.txt)).
 
 ## Requirements
 
+- **macOS** (identity validation uses Darwin's libproc / `KERN_PROCARGS2`)
 - [Claude Code](https://claude.com/claude-code), writing its sessions under `~/.claude/`
 - [`zellij`](https://zellij.dev) on `PATH`
-- Python 3
+- Python 3 (stdlib only)
 
 ## Install
 
