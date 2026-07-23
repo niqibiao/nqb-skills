@@ -8,10 +8,16 @@ reboot/logout with one command.
 Zellij's own resurrection re-runs `claude` fresh and loses which conversation each tab was on;
 this skill closes that gap.
 
+Runs on **macOS and Windows** — the mechanism is identical, only the OS
+introspection differs (macOS: libproc / `KERN_PROCARGS2`; Windows: Win32 PEB / CIM
++ a `conwrap.ps1` console shim). A single `scripts/snapshot.py` dispatches to the
+right implementation by platform.
+
 - **`save`** — snapshot a session (default `$ZELLIJ_SESSION_NAME`, or `--session <name>` from
   anywhere). Writes a minimal restorable layout + manifest and installs it as a **named layout** in
-  `~/.config/zellij/layouts/<name>.kdl`. Refuses to overwrite a good snapshot when run from an
-  unhealthy session.
+  the zellij config dir (`~/.config/zellij/layouts/<name>.kdl` on macOS,
+  `%APPDATA%\Zellij\config\layouts\<name>.kdl` on Windows). Refuses to overwrite a good snapshot
+  when run from an unhealthy session.
 - **`restore`** — **prints a doctor + the exact commands to run by hand; it does not spawn
   anything.** Auto-spawning a zellij server from inside a claude pane makes restored panes inherit
   a non-persisting child session (transcripts stop saving), so restore is deliberately launched
@@ -21,16 +27,17 @@ this skill closes that gap.
 Each tab's Claude session is resolved by asking the OS directly — no hook, no setup: Claude's
 per-process runtime files (`~/.claude/sessions/<pid>.json`) are joined with zellij's pane table on
 the **pane id** carried in each claude process's environment (read exactly via Darwin's
-`KERN_PROCARGS2`), with the process identity-validated (start time, argv, descent from this
-session's `zellij --server`). Same-cwd tabs stay distinct and the id is correct even after
-`/clear`. Identity failures abort the save (fail closed). See [`SKILL.md`](SKILL.md) for the full
-mechanism and its honest limitations.
+`KERN_PROCARGS2` on macOS, `ReadProcessMemory` over the PEB on Windows), with the process
+identity-validated (start time, argv, descent from this session's `zellij --server`). Same-cwd
+tabs stay distinct and the id is correct even after `/clear`. Identity failures abort the save
+(fail closed). See [`SKILL.md`](SKILL.md) for the full mechanism and its honest limitations.
 
 Released under the Apache License 2.0 (see [`LICENSE.txt`](LICENSE.txt)).
 
 ## Requirements
 
-- **macOS** (identity validation uses Darwin's libproc / `KERN_PROCARGS2`)
+- **macOS** (identity validation uses Darwin's libproc / `KERN_PROCARGS2`) **or
+  Windows x64** (Win32 PEB / CIM introspection + PowerShell for `conwrap.ps1`)
 - [Claude Code](https://claude.com/claude-code), writing its sessions under `~/.claude/`
 - [`zellij`](https://zellij.dev) on `PATH`
 - Python 3 (stdlib only)

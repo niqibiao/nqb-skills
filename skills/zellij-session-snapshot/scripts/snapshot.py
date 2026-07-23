@@ -57,7 +57,23 @@ Usage:
   snapshot.py save    [--session NAME]     # default: $ZELLIJ_SESSION_NAME
   snapshot.py restore [--session NAME]     # doctor + manual restore commands
   snapshot.py show    [--session NAME]     # print the saved manifest
+
+Platform dispatch: this file is the macOS implementation. On Windows it hands
+off to scripts/snapshot_windows.py (which uses the Win32 PEB/CIM APIs instead of
+Darwin's libproc/KERN_PROCARGS2). The handoff happens up top, before any of the
+Darwin-only module-level code below runs -- e.g. ctypes.CDLL(None), which is a
+POSIX idiom that fails on Windows.
 """
+
+import os
+import sys
+if sys.platform == "win32":
+    import runpy
+    runpy.run_path(
+        os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                     "snapshot_windows.py"),
+        run_name="__main__")
+    sys.exit()
 
 import argparse
 import calendar
