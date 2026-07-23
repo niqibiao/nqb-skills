@@ -222,5 +222,13 @@ the named layout and keeps timestamped history.
   stale manual-resume hint.
 - Flags outside the replay allowlist (notably `--worktree`) are **not**
   re-applied on restore (listed per-tab at save time as `NOT replayed`).
+- **Windows: use a native `claude.exe`.** The restored pane launches claude via
+  `CreateProcessW`, which cannot execute a batch-file shim — so an npm global
+  install (`claude.cmd` on `PATH`) won't start in a restored pane. Install the
+  native Windows binary (`claude.exe`) instead.
+- **Windows: run `save` at the same elevation as your claudes.** A claude
+  started from an elevated terminal can't be introspected from a non-elevated
+  one (UIPI), so that tab snapshots as `x failed` (with a stale hint) rather
+  than resuming.
 - Plain `zellij attach <name>` alone is **not** a restore path (see above); use
   the restore doctor's printed commands to bootstrap after a reboot.

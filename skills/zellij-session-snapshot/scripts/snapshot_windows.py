@@ -137,6 +137,19 @@ class _PROCESS_BASIC_INFORMATION(ctypes.Structure):
                 ("Reserved3", ctypes.c_void_p)]
 
 
+# Signatures for the remaining calls (set here because GetProcessTimes needs
+# _FILETIME). Explicit HANDLE argtypes stop ctypes from passing a handle through
+# the default c_int marshalling.
+_k32.GetProcessTimes.argtypes = [wintypes.HANDLE] + [ctypes.POINTER(_FILETIME)] * 4
+_k32.GetProcessTimes.restype = wintypes.BOOL
+_ntdll.NtQueryInformationProcess.argtypes = [
+    wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, ctypes.c_ulong,
+    ctypes.POINTER(ctypes.c_ulong)]
+_ntdll.NtQueryInformationProcess.restype = ctypes.c_long   # NTSTATUS
+_k32.LocalFree.argtypes = [ctypes.c_void_p]
+_k32.LocalFree.restype = ctypes.c_void_p
+
+
 def creation_unix(pid):
     """Kernel process-creation time (unix seconds) for a live pid via
     GetProcessTimes, or None if the process is gone / unreadable. Doubles as the
@@ -163,34 +176,36 @@ def _read_mem(h, addr, size):
     return buf.raw[:n.value]
 
 
+def _read_u64(h, addr):
+    """Read a little-endian u64 (pointer or size) from the target, or None."""
+    raw = _read_mem(h, addr, 8)
+    return struct.unpack("<Q", raw)[0] if raw else None
+
+
 def proc_env(pid):
     """EXACT environment dict of a live same-user pid, read from its PEB via
-    ReadProcessMemory. Returns {} if the process is gone (stale file, normal),
-    None if it is alive but unreadable (caller fails closed). x64 offsets:
-    PEB+0x20 -> ProcessParameters; RTL_USER_PROCESS_PARAMETERS Environment @0x80,
+    ReadProcessMemory, or None if it can't be read -- the process is gone, or
+    alive but unreadable (typically a claude started from an ELEVATED terminal,
+    where OpenProcess(VM_READ) is denied by UIPI). x64 offsets: PEB+0x20 ->
+    ProcessParameters; RTL_USER_PROCESS_PARAMETERS Environment @0x80,
     EnvironmentSize @0x3F0."""
     h = _k32.OpenProcess(_PROCESS_QUERY_INFORMATION | _PROCESS_VM_READ,
                          False, pid)
     if not h:
-        return {} if creation_unix(pid) is None else None
+        return None
     try:
         pbi = _PROCESS_BASIC_INFORMATION()
         if _ntdll.NtQueryInformationProcess(h, 0, ctypes.byref(pbi),
                                             ctypes.sizeof(pbi), None) != 0:
             return None
-        peb = ctypes.cast(pbi.PebBaseAddress, ctypes.c_void_p).value
+        peb = pbi.PebBaseAddress          # c_void_p field -> int or None
         if not peb:
             return None
-        pp_raw = _read_mem(h, peb + 0x20, 8)
-        if not pp_raw:
+        pp = _read_u64(h, peb + 0x20)
+        if not pp:
             return None
-        pp = struct.unpack("<Q", pp_raw)[0]
-        env_ptr_raw = _read_mem(h, pp + 0x80, 8)
-        env_sz_raw = _read_mem(h, pp + 0x3F0, 8)
-        if not env_ptr_raw or not env_sz_raw:
-            return None
-        env_ptr = struct.unpack("<Q", env_ptr_raw)[0]
-        env_sz = struct.unpack("<Q", env_sz_raw)[0]
+        env_ptr = _read_u64(h, pp + 0x80)
+        env_sz = _read_u64(h, pp + 0x3F0)
         if not env_ptr or not env_sz or env_sz > (1 << 22):
             return None
         raw = _read_mem(h, env_ptr, env_sz)
@@ -314,6 +329,9 @@ def discover_claude_panes(session):
             pid = int(d["pid"])
         except (KeyError, ValueError, TypeError):
             raise IdentityError(f"runtime file {f} has no valid pid")
+        p = procs.get(pid)
+        if not p or p["name"].lower() != "claude.exe":
+            continue                  # pid gone, or reused by a non-claude
         ct = creation_unix(pid)
         if ct is None:
             continue                  # process gone -- stale file, normal
@@ -322,14 +340,17 @@ def discover_claude_panes(session):
             raise IdentityError(f"runtime file {f} has no numeric startedAt")
         if abs(ct - started / 1000.0) > START_TOLERANCE:
             continue                  # pid reused by a different process -- stale
-        p = procs.get(pid)
-        if not p or p["name"].lower() != "claude.exe":
-            continue                  # pid not (or no longer) a claude
         env = proc_env(pid)
-        if env is None:
-            raise IdentityError(f"cannot read env of live claude pid {pid} ({f})")
         if not env:
-            continue                  # raced to exit between checks
+            # Unreadable env: the process either raced to exit, or is alive but
+            # protected -- typically a claude started from an ELEVATED terminal
+            # (same user, higher integrity) where OpenProcess(VM_READ) is denied
+            # by UIPI. Skip this pid so its pane degrades to a `failed` entry
+            # (still gets a stale hint from pane_command) rather than aborting
+            # the whole save. On macOS same-uid env is always readable so this
+            # never fires; cross-elevation is common on Windows, so a hard abort
+            # here would be a footgun.
+            continue
         if env.get("ZELLIJ_SESSION_NAME") != session:
             continue                  # a claude in another zellij session / none
         try:
@@ -405,9 +426,13 @@ def list_panes(session):
         sys.exit(f"`zellij action list-panes` failed for '{session}':\n"
                  f"{r.stderr}   Is it running?  `zellij list-sessions`")
     out = r.stdout or ""
-    idx = out.find("[")               # trim any shell-banner noise before JSON
-    if idx > 0:
-        out = out[idx:]
+    # Trim any shell-banner noise before the JSON. list-panes may emit either a
+    # top-level array ('[') or a tab-keyed object ('{'), so trim to whichever
+    # comes first -- cutting at the first '[' would corrupt the object form
+    # (handled below) by slicing into its first inner array.
+    starts = [i for i in (out.find("["), out.find("{")) if i >= 0]
+    if starts:
+        out = out[min(starts):]
     try:
         data = json.loads(out)
     except json.JSONDecodeError as e:
@@ -763,6 +788,9 @@ def main():
     if sys.platform != "win32":
         sys.exit("This is the Windows build of the skill (Win32 PEB/CIM process "
                  "introspection). On macOS use the upstream Darwin build.")
+    if ctypes.sizeof(ctypes.c_void_p) != 8:
+        sys.exit("This skill needs 64-bit Python: it reads x64 PEB offsets to "
+                 "introspect claude processes.")
     try:
         sys.stdout.reconfigure(encoding="utf-8")
         sys.stderr.reconfigure(encoding="utf-8")
