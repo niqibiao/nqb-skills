@@ -21,7 +21,11 @@ right implementation by platform.
 - **`restore`** — **prints a doctor + the exact commands to run by hand; it does not spawn
   anything.** Auto-spawning a zellij server from inside a claude pane makes restored panes inherit
   a non-persisting child session (transcripts stop saving), so restore is deliberately launched
-  from a fresh terminal. (`spawn` is a deprecated alias that redirects to the doctor.)
+  from a fresh terminal.
+- **`spawn`** *(Windows only)* — create the session **detached via WMI**, then `zellij attach`.
+  The restore path when you **SSH into the Windows box**: a server started from an SSH shell dies
+  with the connection; the WMI-created one lives outside the SSH process tree and gets a clean
+  default env (no child-session trap). On macOS `spawn` stays deprecated → redirects to the doctor.
 - **`show`** — print the saved manifest (tab, cwd, session id, source, args).
 
 Each tab's Claude session is resolved by asking the OS directly — no hook, no setup: Claude's

@@ -54,9 +54,19 @@ within a claude pane makes every restored pane inherit CLAUDE_CODE_CHILD_SESSION
 so they stop persisting their transcript -- conwrap.ps1 also forces persistence
 as a fallback, but a clean launch context is the real fix.
 
+Over SSH there is no such thing as a fresh LOCAL window: every window is a
+descendant of the SSH connection, and Windows tears that whole tree down when
+the connection drops -- taking the zellij server (and every claude in it) with
+it. `spawn` exists for exactly this: it creates the session DETACHED via WMI
+(Win32_Process.Create), whose child is parented to the WMI provider service --
+outside every SSH job/console AND with the user's clean default environment
+(no SSH_*, no CLAUDE_CODE_CHILD_SESSION). The SSH window then only ever runs a
+disposable `zellij attach`.
+
 Usage:
   snapshot.py save    [--session NAME]     # default: $ZELLIJ_SESSION_NAME
   snapshot.py restore [--session NAME]     # doctor + manual restore commands
+  snapshot.py spawn   [--session NAME]     # create DETACHED via WMI (SSH-safe)
   snapshot.py show    [--session NAME]     # print the saved manifest
 """
 
@@ -271,10 +281,9 @@ def cim_processes():
     return procs
 
 
-def find_server_pid(session, procs):
-    """pid of THIS session's `zellij.exe --server` process. The server's last
-    argv is its socket path, whose basename is exactly the session name. Must
-    match exactly one process -- 0 or >=2 makes every join untrustworthy."""
+def _server_pids(session, procs):
+    """All `zellij.exe --server` pids for `session`. The server's last argv is
+    its socket path, whose basename is exactly the session name."""
     found = []
     for pid, p in procs.items():
         if p["name"].lower() != "zellij.exe":
@@ -283,6 +292,13 @@ def find_server_pid(session, procs):
         if argv and "--server" in argv and \
                 os.path.basename(argv[-1]) == session:
             found.append(pid)
+    return found
+
+
+def find_server_pid(session, procs):
+    """pid of THIS session's `zellij.exe --server` process. Must match exactly
+    one process -- 0 or >=2 makes every join untrustworthy."""
+    found = _server_pids(session, procs)
     if len(found) != 1:
         raise IdentityError(
             f"expected exactly 1 `zellij --server` for '{session}', "
@@ -424,7 +440,10 @@ def list_panes(session):
     r = run(["zellij", "--session", session, "action", "list-panes", "-aj"])
     if r.returncode != 0:
         sys.exit(f"`zellij action list-panes` failed for '{session}':\n"
-                 f"{r.stderr}   Is it running?  `zellij list-sessions`")
+                 f"{r.stderr}   Is it running?  `zellij list-sessions`\n"
+                 f"   (A session can be ALIVE yet unlisted if its %TEMP% "
+                 f"socket file was cleaned away -- run the restore doctor "
+                 f"to diagnose:  snapshot.py restore --session {session})")
     out = r.stdout or ""
     # Trim any shell-banner noise before the JSON. list-panes may emit either a
     # top-level array ('[') or a tab-keyed object ('{'), so trim to whichever
@@ -682,8 +701,17 @@ def cmd_save(args):
 
 
 def session_state(session):
-    """'running' | 'exited' | None for a zellij session name, robust to the
-    ANSI colouring `list-sessions` adds."""
+    """'running' | 'zombie' | 'exited' | None for a zellij session name.
+
+    `list-sessions` alone CANNOT be trusted on Windows: the session registry
+    is socket files under %TEMP%\\zellij, which temp cleaners delete while the
+    server keeps running (observed live). Such a session is alive -- its
+    claudes still run -- but unreachable by ANY new client: list, attach,
+    save and delete-session all fail. So the process table is the authority
+    for 'running'; a live server that list-sessions doesn't show is 'zombie'
+    (must be taskkill'ed, not delete-session'ed); a listing without a live
+    server is 'exited' (a resurrectable corpse to delete)."""
+    listed = None
     r = run(["zellij", "list-sessions", "--no-formatting"])
     out = r.stdout if r.returncode == 0 else \
         run(["zellij", "list-sessions"]).stdout
@@ -691,8 +719,16 @@ def session_state(session):
         clean = re.sub(r"\x1b\[[0-9;]*m", "", line).strip()
         toks = clean.split()
         if toks and toks[0] == session:
-            return "exited" if "EXITED" in clean else "running"
-    return None
+            listed = "exited" if "EXITED" in clean else "listed"
+            break
+    try:
+        has_server = bool(_server_pids(session, cim_processes()))
+    except IdentityError:
+        # Process table unavailable -- degrade to the listing alone.
+        return {"listed": "running", "exited": "exited"}.get(listed)
+    if has_server:
+        return "running" if listed == "listed" else "zombie"
+    return "exited" if listed else None
 
 
 def cmd_restore(args):
@@ -706,7 +742,11 @@ def cmd_restore(args):
     command therefore prints the exact commands to run by hand, plus a health
     check of the launch context -- rather than spawning a server from within
     (possibly) a cc pane. (conwrap.ps1 also forces persistence as a fallback for
-    when someone does launch from a dirty shell.)"""
+    when someone does launch from a dirty shell.)
+
+    Over SSH the fresh-window advice is unattainable (every window is still a
+    descendant of the SSH connection and dies with it), so the doctor detects
+    SSH and steers to `spawn` -- the WMI-detached create -- instead."""
     session = args.session or (os.environ.get("ZELLIJ_SESSION_NAME") or "")
     if not session:
         sys.exit("Pass --session NAME.")
@@ -726,6 +766,8 @@ def cmd_restore(args):
     in_zellij = os.environ.get("ZELLIJ_SESSION_NAME")
     in_claude = bool(os.environ.get("CLAUDE_CODE_CHILD_SESSION")
                      or os.environ.get("CLAUDECODE"))
+    in_ssh = any(os.environ.get(k)
+                 for k in ("SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"))
     residual = session_state(session)
 
     print(f"[doctor] Restore doctor for '{session}' -- this prints "
@@ -740,7 +782,7 @@ def cmd_restore(args):
                   f"claude --resume {t['stale_candidate']})")
     print()
 
-    if not in_zellij and not in_claude:
+    if not in_zellij and not in_claude and not in_ssh:
         print("   OK  Launch context looks clean (not inside zellij or a cc pane).")
     if in_zellij:
         print(f"   !!  You are INSIDE zellij session '{in_zellij}'. Do not "
@@ -750,29 +792,157 @@ def cmd_restore(args):
               "started here inherits the child-session marker and restored "
               "panes would STOP saving transcripts. Launch from a fresh "
               "Windows Terminal / PowerShell window, NOT a cc pane.")
+    if in_ssh:
+        print("   !!  This shell came in over SSH. Any window opened here is "
+              "still a descendant of the SSH connection -- a zellij server "
+              "launched from it DIES when the connection drops. Use `spawn` "
+              "(WMI-detached create) instead of a plain launch.")
     if residual == "running":
         print(f"   !!  '{session}' is already RUNNING -- a plain launch would "
               f"attach to it, not rebuild it. Delete it first (below).")
+    elif residual == "zombie":
+        print(f"   !!  '{session}' has a LIVE server but its socket file "
+              f"(%TEMP%\\zellij) is gone -- deleted by a temp cleaner. No new "
+              f"client can reach it: attach/save/delete-session all fail. "
+              f"Kill its process tree first (below); its claudes die with it, "
+              f"but their transcripts are on disk and resume from the "
+              f"snapshot.")
     elif residual == "exited":
         print(f"   !!  A stale EXITED '{session}' exists -- zellij would "
               f"resurrect it with the wrong layout. Delete it first (below).")
 
-    print("\n   > In a FRESH terminal window (Windows Terminal / pwsh), run:\n")
-    if residual:
-        print(f"       zellij delete-session {session} --force")
-    print(f"       zellij --session {session} --new-session-with-layout "
-          f"{layout_ref}\n")
+    clear_cmds = []
+    if residual == "zombie":
+        try:
+            clear_cmds = [f"taskkill /F /T /PID {p}"
+                          for p in _server_pids(session, cim_processes())]
+        except IdentityError:
+            clear_cmds = ["# (could not resolve the zombie server pid)"]
+    elif residual:
+        clear_cmds = [f"zellij delete-session {session} --force"]
+
+    me = os.path.join(os.path.dirname(os.path.abspath(__file__)), "snapshot.py")
+    if in_ssh:
+        print("\n   > Over SSH: create the session DETACHED (survives "
+              "disconnects), then attach:\n")
+        for c in clear_cmds:
+            print(f"       {c}")
+        print(f"       python3 {me} spawn --session {session}")
+        print(f"       zellij attach {session}\n")
+    else:
+        print("\n   > In a FRESH terminal window (Windows Terminal / pwsh), "
+              "run:\n")
+        for c in clear_cmds:
+            print(f"       {c}")
+        print(f"       zellij --session {session} --new-session-with-layout "
+              f"{layout_ref}\n")
     print("   Panes come up suspended -- switch to each tab and press Enter to "
           "wake its `claude --resume`.")
 
 
 def cmd_spawn(args):
-    """Deprecated: background-spawning a restore is exactly what produced
-    non-persisting child sessions. Redirect to the manual doctor."""
-    print("[i] `spawn` no longer background-creates a session -- that path made "
-          "restored panes inherit a non-persisting child session. Showing the "
-          "manual restore doctor instead:\n")
-    cmd_restore(args)
+    """Create <session> DETACHED from its saved layout via WMI, then print the
+    attach command.
+
+    Why WMI (Win32_Process.Create): a zellij server started from an SSH shell
+    is a descendant of the sshd connection's process tree (job/ConPTY); when
+    the connection drops, Windows tears the tree down and the session dies --
+    zellij has no Unix-style daemonize escape on Windows. A WMI-created
+    process is parented to the WMI provider service instead: outside every
+    SSH job and console, and with the user's clean DEFAULT environment --
+    correct TEMP/APPDATA (so the socket and named layout resolve), and no
+    SSH_* / CLAUDE_CODE_CHILD_SESSION. That last part means this path is also
+    immune to the child-session persistence trap that got the old
+    auto-spawn-from-a-cc-pane removed: the env is clean by construction, not
+    by cleanup. The SSH window then only ever runs a disposable
+    `zellij attach` -- reconnect and re-attach after any drop."""
+    session = args.session or (os.environ.get("ZELLIJ_SESSION_NAME") or "")
+    if not session:
+        sys.exit("Pass --session NAME.")
+    clp = config_layout_path(session)
+    snap = os.path.join(SNAP_ROOT, session, "restore-layout.kdl")
+    if not (os.path.exists(clp) or os.path.exists(snap)):
+        sys.exit(f"No snapshot/layout for '{session}'. Run `save` first.")
+    layout_ref = session if os.path.exists(clp) else snap
+
+    state = session_state(session)
+    if state == "running":
+        sys.exit(f"'{session}' is already running -- attach with:\n"
+                 f"    zellij attach {session}\n"
+                 f"To rebuild it from the snapshot instead, first run:\n"
+                 f"    zellij delete-session {session} --force")
+    if state == "zombie":
+        # Live server whose %TEMP% socket file a temp cleaner deleted: no new
+        # client can reach it (attach/save/delete-session all fail), and a
+        # plain spawn would create an unreachable-twin name collision.
+        try:
+            pids = _server_pids(session, cim_processes())
+        except IdentityError:
+            pids = []
+        kill = "\n".join(f"    taskkill /F /T /PID {p}" for p in pids) or \
+            "    (could not resolve the zombie server pid)"
+        sys.exit(f"'{session}' has a LIVE server but its socket file is gone "
+                 f"(temp cleaner) -- unreachable by any client. Kill the old "
+                 f"tree first, then re-run spawn (its claudes' transcripts "
+                 f"are on disk and will resume):\n{kill}")
+    if state == "exited":
+        # Clear the stale corpse or zellij resurrects it with the wrong
+        # layout. delete-session returns before it's actually gone -- poll.
+        run(["zellij", "delete-session", session, "--force"])
+        for _ in range(20):
+            if session_state(session) is None:
+                break
+            time.sleep(0.25)
+        else:
+            sys.exit(f"Could not clear the stale EXITED '{session}'.")
+
+    zellij = shutil.which("zellij") or "zellij"
+    cmdline = (f'"{zellij}" --new-session-with-layout "{layout_ref}" '
+               f'attach --create-background "{session}"')
+    ps = ("$r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create "
+          "-Arguments @{ CommandLine = '" + cmdline.replace("'", "''") + "' }; "
+          "Write-Output $r.ReturnValue")
+    r = run([_pwsh(), "-NoProfile", "-NonInteractive", "-Command", ps])
+    rv = (r.stdout or "").strip().splitlines()[-1:] or [""]
+    if r.returncode != 0 or rv[0] != "0":
+        sys.exit(f"WMI spawn failed (ReturnValue={rv[0] or '?'}):\n{r.stderr}")
+
+    for _ in range(40):
+        if session_state(session) == "running":
+            break
+        time.sleep(0.25)
+    else:
+        sys.exit(f"Spawned, but '{session}' never appeared in list-sessions.\n"
+                 f"Check the layout parses:  zellij --session {session} "
+                 f"--new-session-with-layout {layout_ref}")
+
+    # Fail-loud sanity: the new server must be outside any SSH lineage with a
+    # clean env, or the whole point of the detached spawn is defeated.
+    warn = None
+    try:
+        server = find_server_pid(session, cim_processes())
+        env = proc_env(server)
+        if env is None:
+            warn = "   ! could not read the new server's env to verify it."
+        else:
+            bad = [k for k in env if k.startswith("SSH_")
+                   or k == "CLAUDE_CODE_CHILD_SESSION"]
+            if bad:
+                warn = (f"   ! server env unexpectedly carries "
+                        f"{', '.join(bad)} -- it may not survive an SSH drop "
+                        f"or persist transcripts.")
+    except IdentityError as e:
+        warn = f"   ! could not verify the new server: {e}"
+
+    print(f"[OK] '{session}' created detached -- the server lives outside "
+          f"this SSH/terminal session.")
+    if warn:
+        print(warn)
+    print(f"   Attach with:  zellij attach {session}")
+    print(f"   After an SSH drop, reconnect and re-attach -- the session "
+          f"survives.")
+    print(f"   Panes come up suspended -- press Enter in each tab to wake its "
+          f"claude.")
 
 
 def cmd_show(args):

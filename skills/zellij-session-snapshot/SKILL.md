@@ -48,11 +48,15 @@ python3 ~/.claude/skills/zellij-session-snapshot/scripts/snapshot.py show    --s
   safe launch context (not inside zellij / not a cc pane), and whether a stale
   same-name session needs deleting — then prints the `zellij --session <name>
   --new-session-with-layout <name>` line to run in a fresh terminal window.
+- **spawn** *(Windows only)* — create the session **detached via WMI**
+  (`Win32_Process.Create`), then just `zellij attach <name>`. This is the
+  restore path **when you SSH into the Windows box** — see *Windows over SSH*
+  below. It is safe by construction: the WMI-created server gets the user's
+  clean default environment (no `SSH_*`, no `CLAUDE_CODE_CHILD_SESSION`), so
+  the child-session trap that got the old auto-spawn removed cannot occur.
+  (On macOS `spawn` remains deprecated and just redirects to the `restore`
+  doctor.)
 - **show** — print the saved manifest (tab, cwd, session id, source, args).
-
-  (`spawn` still exists but is deprecated — it now just redirects to the
-  `restore` doctor, since background-spawning was the very thing that produced
-  non-persisting sessions.)
 
 Output lives in `~/.claude/zellij-snapshots/<name>/` (`restore-layout.kdl` +
 timestamped history + `manifest.json`) and the named-layout path above.
@@ -176,6 +180,35 @@ of defence the layout forces persistence per-pane (`conwrap.ps1` on Windows, a
 `CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1` prefix on macOS). `restore` therefore
 just prints a **doctor** (launch-context health check + the exact commands)
 instead of spawning anything.
+
+## Windows over SSH: use `spawn` (the SSH-disconnect trap)
+
+If you SSH into the Windows box, the fresh-window advice above is
+**unattainable**: every window you can open is still a descendant of the SSH
+connection, and Windows tears that whole process tree down when the connection
+drops — zellij has no Unix-style daemonize escape on Windows, so the server
+(and every claude in it) dies with the disconnect.
+
+`spawn` fixes this by creating the session **detached via WMI**
+(`Win32_Process.Create`): the server is parented to the WMI provider service —
+outside every SSH job and console, unreachable by the disconnect teardown —
+and gets the user's clean **default** environment: correct `TEMP`/`APPDATA`
+(so the socket and named layout resolve for your SSH shells), and no `SSH_*` /
+`CLAUDE_CODE_CHILD_SESSION` (so the persistence trap above cannot occur — the
+env is clean by construction, not by cleanup). The SSH window then only ever
+runs a disposable `zellij attach`:
+
+```
+python3 ~/.claude/skills/zellij-session-snapshot/scripts/snapshot.py spawn --session work
+zellij attach work
+# ... SSH drops ... reconnect, then simply:
+zellij attach work
+```
+
+The `restore` doctor detects an SSH context (`SSH_CONNECTION`/`SSH_CLIENT`/
+`SSH_TTY`) and prints this flow instead of the fresh-window one. After the
+spawn, `spawn` verifies the new server's env is actually clean and warns
+loudly if not.
 
 ## The intended flow
 
