@@ -251,12 +251,16 @@ def _pwsh():
 
 
 def cim_processes():
-    """{pid: {'name', 'ppid', 'cmdline'}} for every process, in one CIM call.
-    Output is forced to UTF-8 so CJK paths / command lines survive."""
+    """{pid: {'name', 'ppid', 'cmdline', 'sid'}} for every process, in one CIM
+    call. `sid` is the Windows login-session id (0 for services / an SSH login,
+    1+ for interactive desktops); an empty `cmdline` on a live process means it
+    runs in another login session or at a higher elevation and CIM can't read
+    its command line from here. Output is forced to UTF-8 so CJK paths / command
+    lines survive."""
     script = ("[Console]::OutputEncoding=[Text.Encoding]::UTF8; "
               "Get-CimInstance Win32_Process | "
-              "Select-Object ProcessId,ParentProcessId,Name,CommandLine | "
-              "ConvertTo-Json -Compress")
+              "Select-Object ProcessId,ParentProcessId,Name,CommandLine,"
+              "SessionId | ConvertTo-Json -Compress")
     r = subprocess.run([_pwsh(), "-NoProfile", "-NonInteractive", "-Command",
                         script], capture_output=True, text=True,
                        encoding="utf-8", errors="replace")
@@ -275,9 +279,11 @@ def cim_processes():
         pid = d.get("ProcessId")
         if pid is None:
             continue
+        sid = d.get("SessionId")
         procs[int(pid)] = {"name": d.get("Name") or "",
                            "ppid": int(d.get("ParentProcessId") or 0),
-                           "cmdline": d.get("CommandLine") or ""}
+                           "cmdline": d.get("CommandLine") or "",
+                           "sid": int(sid) if sid is not None else None}
     return procs
 
 
@@ -304,6 +310,49 @@ def find_server_pid(session, procs):
             f"expected exactly 1 `zellij --server` for '{session}', "
             f"found {len(found)} ({found})")
     return found[0]
+
+
+def _foreign_zellij(procs):
+    """zellij.exe processes we CANNOT introspect: a live process with an empty
+    command line runs in another Windows login session (e.g. an SSH login is
+    session 0, the local desktop is session 1) or at a higher elevation, so CIM
+    returns no CommandLine and we can't tell which session name it serves.
+    Returns [{'pid', 'sid'}] sorted by pid.
+
+    This is the one blind spot of `_server_pids`/`session_state`: a stale
+    same-name server hiding in another login session is invisible to them, so a
+    spawn could collide with it. Never silently ignored -- surfaced as a
+    warning by the doctor and spawn (a client, not just a server, also lands
+    here since an empty cmdline can't be told apart, so it's advisory)."""
+    out = [{"pid": pid, "sid": p.get("sid")}
+           for pid, p in procs.items()
+           if p["name"].lower() == "zellij.exe" and not p["cmdline"]]
+    return sorted(out, key=lambda x: x["pid"])
+
+
+def foreign_zellij_note(session):
+    """Warning lines about uninspectable foreign zellij processes, or [] if
+    there are none / the process table is unavailable. Shared by the doctor and
+    spawn so both flag the same collision risk with identical wording."""
+    try:
+        foreign = _foreign_zellij(cim_processes())
+    except IdentityError:
+        return []
+    if not foreign:
+        return []
+    pids = ", ".join(str(f["pid"]) for f in foreign)
+    sids = sorted({f["sid"] for f in foreign if f["sid"] is not None})
+    where = (f"login session {', '.join(map(str, sids))}"
+             if sids else "another login session")
+    return [
+        f"   !!  {len(foreign)} zellij.exe process(es) (PID {pids}) run in "
+        f"{where} / at a higher elevation -- I can't read their command line, "
+        f"so I can't tell if one is a stale '{session}' server.",
+        f"       If it is, a spawn/launch could collide with an invisible "
+        f"same-name session. Check from THAT context (your SSH session, or an "
+        f"elevated pwsh):",
+        f"           tasklist /FI \"IMAGENAME eq zellij.exe\"",
+    ]
 
 
 def is_descendant(pid, ancestor, procs, max_depth=12):
@@ -710,7 +759,13 @@ def session_state(session):
     save and delete-session all fail. So the process table is the authority
     for 'running'; a live server that list-sessions doesn't show is 'zombie'
     (must be taskkill'ed, not delete-session'ed); a listing without a live
-    server is 'exited' (a resurrectable corpse to delete)."""
+    server is 'exited' (a resurrectable corpse to delete).
+
+    Blind spot: a server in ANOTHER login session / elevation has an
+    unreadable command line, so `_server_pids` can't attribute it and it does
+    not count toward any state here. `foreign_zellij_note()` surfaces that case
+    separately, since this function alone would report such a hidden same-name
+    server as clean."""
     listed = None
     r = run(["zellij", "list-sessions", "--no-formatting"])
     out = r.stdout if r.returncode == 0 else \
@@ -810,6 +865,8 @@ def cmd_restore(args):
     elif residual == "exited":
         print(f"   !!  A stale EXITED '{session}' exists -- zellij would "
               f"resurrect it with the wrong layout. Delete it first (below).")
+    for line in foreign_zellij_note(session):
+        print(line)
 
     clear_cmds = []
     if residual == "zombie":
@@ -895,6 +952,12 @@ def cmd_spawn(args):
             time.sleep(0.25)
         else:
             sys.exit(f"Could not clear the stale EXITED '{session}'.")
+
+    # A same-name server hiding in another login session is invisible to the
+    # state checks above; warn (don't hard-block -- an unrelated foreign zellij
+    # is common and legitimate) before creating a possibly-colliding twin.
+    for line in foreign_zellij_note(session):
+        print(line)
 
     zellij = shutil.which("zellij") or "zellij"
     cmdline = (f'"{zellij}" --new-session-with-layout "{layout_ref}" '

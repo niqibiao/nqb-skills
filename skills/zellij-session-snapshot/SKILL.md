@@ -210,6 +210,19 @@ The `restore` doctor detects an SSH context (`SSH_CONNECTION`/`SSH_CLIENT`/
 spawn, `spawn` verifies the new server's env is actually clean and warns
 loudly if not.
 
+**Stay in one login session.** A WMI-created server lands in the login session
+of the WMI provider (**session 0** — the same session an SSH login runs in), so
+from SSH you can see and manage it normally. But a process in **another** login
+session — the local desktop is session 1 — or at a different elevation is
+opaque to CIM: its command line reads back empty, so `session_state` cannot
+tell whether it is a stale same-name server. `restore` and `spawn` therefore
+**warn** when any such uninspectable `zellij.exe` exists (`tasklist /FI
+"IMAGENAME eq zellij.exe"` to inspect it from the owning context) — they can't
+kill or attribute it for you across the boundary. Practical rule: manage a
+given session from the same place you spawned it (spawn over SSH → attach over
+SSH; kill a stale one from a shell in its own login session, or an elevated
+one).
+
 ## The intended flow
 
 ```
