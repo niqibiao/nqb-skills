@@ -13,9 +13,11 @@ that resumes each with `--resume <session-id>`.
 How each pane's session is found — by asking the OS, no side channel:
 
 1. Enumerate Claude's per-process runtime files `~/.claude/sessions/<pid>.json`
-   (kind=interactive). Each records the process's CURRENT sessionId — correct
-   even after /clear and for launches without --resume. (Not pgrep: it has
-   been observed to miss live claude processes.)
+   (kind=interactive and kind=bg). (Not pgrep: it has been observed to miss
+   live claude processes.) A pane process's own sessionId is written at
+   startup and is NOT rewritten when the conversation moves on, so it can be a
+   stale placeholder — see the kind=bg note below and the transcript probe in
+   resolve_cwd().
 2. Validate each pid's identity: alive + kernel start time (proc_pidinfo)
    matches the file's procStart (parsed as UTC, fixed English format) within
    2s — defeats pid reuse; argv[0] must be claude (kernel comm is the version
@@ -27,6 +29,16 @@ How each pane's session is found — by asking the OS, no side channel:
    process (direct ppid is the fast path; restored panes run under a zsh
    wrapper so the chain is claude → zsh → server). This rejects orphans from
    a dead same-name session whose pane ids could otherwise collide.
+
+A pane's conversation can be hosted by a DAEMON-SPAWNED background process
+(`claude bg-spare`, runtime kind=bg) rather than by the pane process itself —
+claude parks the session and the pane becomes a client of it. The pane
+process's runtime file then still advertises the sessionId it started with,
+which typically has no transcript at all. bg processes inherit ZELLIJ_PANE_ID
+from the pane whose claude spawned their daemon, so they join on the same key;
+a bg session whose transcript is on disk WINS over the pane process's own id.
+Flags are still replayed from the PANE's argv — the bg process's argv is
+`claude bg-spare --bg-spare …`, which must never be replayed.
 
 zellij's `pane_command` is NEVER used for identity — it reports the current
 foreground child (an MCP server, caffeinate, …), not the launch command. It is
@@ -224,18 +236,21 @@ def is_descendant(pid, ancestor, max_depth=10):
 # ── pane → session join ───────────────────────────────────────────────────────
 
 def discover_claude_panes(session):
-    """pane_id → {pid, session_id, cwd, argv} for every live interactive
-    claude in `session`, validated end-to-end. Raises IdentityError on any
-    condition that makes identity untrustworthy."""
+    """(interactive, bg) for `session`, both validated end-to-end:
+    interactive is pane_id → {pid, session_id, cwd, argv} for the claude
+    running in the pane; bg is pane_id → [{pid, session_id, cwd}, …] for the
+    daemon-hosted (parked) sessions such a pane may actually be displaying.
+    Raises IdentityError on any condition that makes identity untrustworthy."""
     server = find_server_pid(session)
-    join = {}
+    join, bg = {}, {}
     for f in sorted(glob.glob(os.path.join(SESSIONS, "*.json"))):
         try:
             with open(f) as fh:
                 d = json.load(fh)
         except (OSError, json.JSONDecodeError) as e:
             raise IdentityError(f"unreadable runtime file {f}: {e}")
-        if d.get("kind") != "interactive" or not d.get("sessionId"):
+        kind = d.get("kind")
+        if kind not in ("interactive", "bg") or not d.get("sessionId"):
             continue
         try:
             pid = int(d["pid"])
@@ -256,7 +271,9 @@ def discover_claude_panes(session):
             raise IdentityError(
                 f"cannot read argv/env of live pid {pid} ({f})")
         argv, env = pa
-        if not argv or os.path.basename(argv[0]) != "claude":
+        # claude rewrites argv[0] into a process title for its helper
+        # processes ('claude bg-spare'), so compare the leading token.
+        if (os.path.basename(argv[0]) if argv else "").split(" ")[0] != "claude":
             continue                  # pid reused by something else — stale
         envd = dict(e.split("=", 1) for e in env if "=" in e)
         if envd.get("ZELLIJ_SESSION_NAME") != session:
@@ -267,13 +284,17 @@ def discover_claude_panes(session):
             continue                  # claude not under zellij
         if not is_descendant(pid, server):
             continue                  # orphan of a dead same-name session
+        if kind == "bg":
+            bg.setdefault(pane_id, []).append(
+                {"pid": pid, "session_id": d["sessionId"], "cwd": d.get("cwd")})
+            continue
         if pane_id in join:
             raise IdentityError(
                 f"two live claudes claim pane {pane_id} of '{session}': "
                 f"pids {join[pane_id]['pid']} and {pid}")
         join[pane_id] = {"pid": pid, "session_id": d["sessionId"],
                          "cwd": d.get("cwd"), "argv": argv}
-    return join
+    return join, bg
 
 
 def replay_flags(argv_tail):
@@ -352,6 +373,24 @@ def resolve_cwd(sid, cwds):
     return None
 
 
+def resolve_bg(bgs, cwds):
+    """(session_id, cwd) of the daemon-hosted session a pane is displaying, or
+    None. Only candidates whose transcript is actually on disk count. Two of
+    them means we cannot tell which conversation the pane shows — fail closed
+    rather than snapshot a coin flip."""
+    hits = []
+    for b in bgs:
+        cwd = resolve_cwd(b["session_id"], [b.get("cwd")] + cwds)
+        if cwd:
+            hits.append((b["session_id"], cwd, b["pid"]))
+    if len(hits) > 1:
+        raise IdentityError(
+            "pane has " + str(len(hits)) + " daemon-hosted sessions with a "
+            "transcript, cannot tell which one it shows: "
+            + ", ".join(f"{s} (pid {p})" for s, _, p in hits))
+    return (hits[0][0], hits[0][1]) if hits else None
+
+
 _RESUME_RE = re.compile(r"--resume[ =]([0-9a-f-]{36})")
 
 
@@ -360,7 +399,7 @@ def build_manifest(session):
     claude process table (pane id → live session id) on PANE ID. Ordered by
     tab position. Raises IdentityError (whole save aborts) on identity
     failures; panes without a live claude become skip/failed entries."""
-    join = discover_claude_panes(session)
+    join, bg_join = discover_claude_panes(session)
     panes = [p for p in list_panes(session)
              if not p.get("is_plugin") and not p.get("exited")]
     manifest = []
@@ -370,17 +409,25 @@ def build_manifest(session):
         pane_id = p.get("id")
         pane_command = p.get("pane_command") or ""
         cand = join.pop(pane_id, None) if pane_id is not None else None
+        bgs = bg_join.pop(pane_id, []) if pane_id is not None else []
 
         if cand:
             sid = cand["session_id"]
             keep, unreplayed = replay_flags(cand["argv"][1:])
-            cwd = resolve_cwd(sid, [cand["cwd"], pane_cwd])
+            # A daemon-hosted session wins: once the conversation is parked
+            # into a bg process, the pane process's own sessionId is a stale
+            # startup placeholder. Flags still come from the PANE's argv.
+            parked = resolve_bg(bgs, [cand["cwd"], pane_cwd])
+            if parked:
+                sid, cwd, source = parked[0], parked[1], "daemon"
+            else:
+                cwd, source = resolve_cwd(sid, [cand["cwd"], pane_cwd]), "process"
             if cwd:
                 manifest.append({
                     "tab": tab, "cwd": cwd, "session_id": sid,
                     "args": ["--resume", sid] + keep,
                     "unreplayed_flags": unreplayed,
-                    "source": "process", "pane_id": pane_id,
+                    "source": source, "pane_id": pane_id,
                 })
             else:
                 # Live claude but no transcript on disk yet (brand-new,
@@ -538,7 +585,8 @@ def cmd_save(args):
           f"resumable session:\n")
     for m in manifest:
         sid = m["session_id"] or "(snapshot FAILED — will start fresh)"
-        tag = {"process": "live ✓", "failed": "✗ failed"}.get(m["source"], "-")
+        tag = {"process": "live ✓", "daemon": "live ✓ (daemon-hosted)",
+               "failed": "✗ failed"}.get(m["source"], "-")
         extra = [a for a in m.get("args", [])
                  if a != "--resume" and a != m["session_id"]]
         print(f"   • {m['tab']:<18} {m['cwd']}")

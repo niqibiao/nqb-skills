@@ -72,15 +72,21 @@ timestamped history + `manifest.json`) and the named-layout path above.
    command.
 2. **`~/.claude/sessions/<pid>.json`** — Claude Code's per-process runtime
    files, enumerated directly (not via `pgrep`, which has been observed to miss
-   live claudes). Each records the process's **current** `sessionId` — correct
-   even after `/clear` and for launches **without** `--resume`.
+   live claudes). A record's `sessionId` is **not** authoritative on its own —
+   it is written at startup and is **not** rewritten when the conversation moves
+   on, so every id is confirmed against a transcript on disk before it is
+   snapshotted. macOS additionally reads `kind=bg` records (daemon-hosted
+   sessions, see below); Windows currently reads only `kind=interactive`.
 3. Each pid is **identity-validated**: alive, kernel start time matches the
    file's start time within a tolerance (defeats pid reuse), the image is
    `claude`, and the process is a **descendant of this session's
    `zellij --server`** (rejects orphans from a dead same-name session; restored
    panes chain claude → shell wrapper → server, so this is an ancestor walk).
    - **macOS**: `proc_pidinfo` start-epoch vs the file's `procStart`
-     (fixed-format UTC parse); ppid walk via `proc_pidinfo`.
+     (fixed-format UTC parse); ppid walk via `proc_pidinfo`; the image is
+     `argv[0]`'s **leading token** — claude rewrites argv[0] into a process
+     title for helper processes (`claude bg-spare`), one argv element with a
+     space in it.
    - **Windows**: `GetProcessTimes` vs the file's `startedAt` (unix-ms;
      `procStart` there is .NET ticks rendered in a machine-local timezone, so it
      is ambiguous and unused); ancestor walk over the CIM `ParentProcessId`
@@ -99,6 +105,15 @@ Per-pane outcome:
   process's cwd, then the pane's cwd) for the one whose Claude project dir
   actually holds the transcript — so a session created in `repo/X` then `cd`'d
   into a **worktree** still restores in `repo/X` where `--resume` can find it.
+- **`live (daemon-hosted)`** (macOS only) — the pane's conversation is *parked*
+  into a daemon-spawned background process (`claude bg-spare`, runtime
+  `kind=bg`) and the pane is only its client. The pane process then still
+  advertises the `sessionId` it started with, which typically has no transcript
+  at all — so a `kind=bg` session that joins on the same `ZELLIJ_PANE_ID`
+  (inherited through the daemon) **and** has a transcript on disk wins over it.
+  Flags are still replayed from the **pane's** argv, never the bg process's
+  (`bg-spare …`). Two such sessions on one pane → identity error, whole save
+  aborts. Windows has no equivalent yet: such a tab snapshots as `x failed`.
 - **`x failed`** — no live claude owns the pane (exited claude; a brand-new
   still-empty session; or a **non-persisting child session** that never wrote a
   runtime file — see the trap below). The tab restores as a fresh claude. If the
