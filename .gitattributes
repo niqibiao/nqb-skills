@@ -1,0 +1,4 @@
+# Normalize all text to LF in the repository and the working tree, so line
+# endings are deterministic regardless of each machine's core.autocrlf. Binary
+# files are auto-detected and left untouched.
+* text=auto eol=lf
